@@ -1,14 +1,14 @@
 # OnlyKey Automated Test Suite — Test Plan
 
 Tracks every test this suite drives, plus the PQC test cases handed down from
-the maintainer (`../OnlyKey-PQC-Test-Cases.md`, `../OnlyKey-PQC-Test-Report.md`).
+the maintainer (`./OnlyKey-PQC-Test-Cases.md`, `./OnlyKey-PQC-Test-Report.md`).
 Status legend: ✅ confirmed/implemented · 🚧 scaffolded, not yet run · ❓ needs
 more research before it can be written.
 
 Repos under test (all cloned as siblings of this repo):
-`../arduino-1.6.5-r5-teensy_127` (firmware), `../python-onlykey` (CLI + age
-plugin), `../lib-agent` (agent packaging), `../onlykey.github.io` (web app),
-`../OnlyKey-App` (setup GUI), `../serial` (raw HID capture tool this suite's
+`./arduino-1.6.5-r5-teensy_127` (firmware), `./python-onlykey` (CLI + age
+plugin), `./lib-agent` (agent packaging), `./onlykey.github.io` (web app),
+`./OnlyKey-App` (setup GUI), `./serial` (raw HID capture tool this suite's
 `lib/hid.js` supersedes for scripted use).
 
 ## Design principle: two different strategies depending on what's under test
@@ -31,8 +31,8 @@ actually is:
   paths (wipe, digit injection) that have no app equivalent by design.
 
 - **`onlykey-cli` / `age-plugin-onlykey` / `onlykey-agent` (Python CLI
-  tooling from `../python-onlykey`, `../lib-agent`)** — already scriptable
-  binaries, installed in `../okpqc-venv`. No emulation needed or wanted:
+  tooling from `./python-onlykey`, `./lib-agent`)** — already scriptable
+  binaries, installed in `./okpqc-venv`. No emulation needed or wanted:
   **shell out to the real binaries directly** (`child_process.execFile`,
   as `checkStatus()` in `lib/device.js` already does against `onlykey-cli
   getlabels`). Reimplementing their protocol logic in Node would just be a
@@ -128,13 +128,13 @@ before/after comparison possible.
 | ENC-01 | Confirm `profilemode == STDPROFILE1` on the STD build after setup | ❓ needs research | Need a way to read `profilemode` back out — likely via the existing DEBUG EEPROM dump (`wipeEEPROM()`, `okcore.cpp:2898-2924`, gated by `DEBUG_CTAP_VERBOSE`) rather than a dedicated status command. |
 | ENC-02 | Confirm PIN/profile data at rest is NOT plaintext-recoverable on the STD (encrypted) build | ❓ needs research | Dump EEPROM/flash via the DEBUG channel, inspect for the raw PIN digits / recognizable structure. This is the actual "confirm encryption is true" test — negative result (no plaintext match) is the pass condition. |
 | ENC-03 | Confirm PIN/profile data at rest on the Travel (non-encrypted) build for contrast | ❓ needs research | Same dump technique against SETUP-06's build; expect the difference to be visible, which is what proves ENC-02 is meaningful rather than trivially true on both. |
-| ENC-04 | PQC keygen/decrypt correctly no-ops on non-encrypted profile | ❓ needs research | The maintainer's report claims `set_private` returns early on `NONENCRYPTEDPROFILE`, blocking PQC keygen/decrypt (see Gotchas / risk register item 3 in `../OnlyKey-PQC-Test-Report.md`). Worth a dedicated negative test once SETUP-06's build exists: attempt TC-04 against it and confirm a clean no-op/error, not a hang or crash. |
+| ENC-04 | PQC keygen/decrypt correctly no-ops on non-encrypted profile | ❓ needs research | The maintainer's report claims `set_private` returns early on `NONENCRYPTEDPROFILE`, blocking PQC keygen/decrypt (see Gotchas / risk register item 3 in `./OnlyKey-PQC-Test-Report.md`). Worth a dedicated negative test once SETUP-06's build exists: attempt TC-04 against it and confirm a clean no-op/error, not a hang or crash. |
 
 ## 2. Firmware (maintainer TC-01–TC-03, TC-15)
 
 | ID | Title | Status | Notes |
 |----|-------|--------|-------|
-| TC-01 | Firmware builds | ✅ done (prior session) | `../arduino-1.6.5-r5-teensy_127` at `d7d5080`, compiled clean, `builds/OnlyKey.cpp.hex` present. |
+| TC-01 | Firmware builds | ✅ done (prior session) | `./arduino-1.6.5-r5-teensy_127` at `d7d5080`, compiled clean, `builds/OnlyKey.cpp.hex` present. |
 | TC-02 | Flash + boot | ✅ done (prior session) | Flashed, device enumerates (`lsusb`: `1d50:60fc OnlyKey`). |
 | TC-03 | Initialize with an encrypted profile | ✅ done, via SETUP-03 | |
 | TC-15 | Non-PQ regression: PIN unlock, slot labels, U2F/FIDO2, RSA/ECC | 🚧 PIN unlock done (SETUP-04); slot labels/U2F/FIDO2/RSA/ECC not started | |

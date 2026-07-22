@@ -1,0 +1,17 @@
+{
+  "name": "onlykey",
+  "version": "1.0.0",
+  "description": "",
+  "license": "ISC",
+  "author": "",
+  "type": "commonjs",
+  "main": "serial.js",
+  "scripts": {
+    "start": "node serial.js",
+    "capture": "node capture.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "dependencies": {
+    "node-hid": "^3.4.0"
+  }
+}
