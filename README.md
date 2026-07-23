@@ -15,9 +15,20 @@ Repos this suite depends on are expected as siblings of this directory:
 ```
 onlykey/
   arduino-1.6.5-r5-teensy_127/   # firmware
-  python-onlykey/                # onlykey-cli, age-plugin-onlykey
+  0c-coder-python-onlykey/       # onlykey-cli, age-plugin-onlykey (correct fork - see below)
   okpqc-venv/                    # Python venv with the above installed editable
   onlykey-testing/                # this repo
+```
+
+There are two `python-onlykey` clones in this directory tree:
+`0c-coder-python-onlykey` is the one that matches the build under test
+(`OnlyKey-PQC-Test-Report.md`'s header table, master SHA `68c1c84` at time
+of writing) - it has the composite-PGP-PQC and derived-X-Wing work that
+`python-onlykey` (the original clone) doesn't. `okpqc-venv`'s editable
+`onlykey` install must point at `0c-coder-python-onlykey`:
+
+```bash
+okpqc-venv/bin/pip install -e ../0c-coder-python-onlykey
 ```
 
 ```bash

@@ -45,9 +45,9 @@ These passed in software during development; the tester is validating the
 | 01 | Firmware builds | PASS | Compiles clean via `make docker-build-local`. |
 | 02 | Flash + boot | PASS | Device enumerates (`lsusb`: `1d50:60fc OnlyKey`). |
 | 03 | Init encrypted profile | PASS | Automated end-to-end (`onlykey-testing` SETUP-03/04): fresh device UNINITIALIZED → primary/secondary/self-destruct PIN set via host-message flow → reboot → unlocked. No physical button presses. |
-| 04 | Generate X-Wing age identity | PASS (after fixes) | `age-plugin-onlykey --generate` now produces a valid `AGE-PLUGIN-ONLYKEY-1...` identity + `age1onlykey1...` recipient, fully automated (`onlykey-testing/lib/pqc_keygen.js`). Required fixing 5 stacked bugs first — see below and `onlykey-testing/TEST-PLAN.md`'s TC-04 entry for full detail: (1) `age_plugin`'s `OKGENKEY` pointed at the wrong message type (`OKSETSLOT` instead of `OKSETPRIV`), (2) keygen's `CRYPTO_AUTH` confirmation gate was unreachable — nothing in the `OKSETPRIV` path ever primed it, (3) both keygen functions derived the returned public key from AES-GCM ciphertext instead of the plaintext seed (real crypto-correctness bug, independent of reachability), (4) `SLOT_MLKEM=133`/`SLOT_XWING=134` aren't valid ECC slots — firmware only supports 101-132, fixed by using 101/102, (5) `OKSETPRIV` requires config mode, which needs an extra button-6 long-press + PIN re-entry sequence not previously documented anywhere. Fixes committed to `0c-coder-libraries`, `OnlyKey-Firmware`, and `python-onlykey`. |
+| 04 | Generate X-Wing age identity | PASS (after fixes) | `age-plugin-onlykey --generate` produces a valid `AGE-PLUGIN-ONLYKEY-1...` identity + `age1onlykey1...` recipient, fully automated (`onlykey-testing/lib/pqc_keygen.js`), confirmed against the **correct** CLI fork (`0c-coder-python-onlykey`, matching this report's header table SHA `68c1c84` — an earlier `python-onlykey` clone used during initial debugging turned out to be stale and has since been superseded). Two real firmware bugs and two harness-timing bugs apply regardless of fork and are fixed: (1) keygen's `CRYPTO_AUTH` confirmation gate was unreachable, (2) both keygen functions derived the returned public key from AES-GCM ciphertext instead of the plaintext seed, (3) `OKSETPRIV` requires config mode (extra button-6 long-press + PIN re-entry), (4) an `isfade` timing race on that long-press. The wrong-message-type/invalid-slot-number bugs found during initial debugging were specific to the stale fork — the correct fork already had those right, no Python fix needed. One new, still-open flakiness item found against the correct fork: its `onlykey_hid.py` can intermittently return a truncated response (~1-in-3 runs) due to an early-abort bug in its read-retry loop — not fixed (out of scope for this pass), see `onlykey-testing/TEST-PLAN.md`'s TC-04 entry. Fixes committed to `0c-coder-libraries` and `OnlyKey-Firmware`; no changes needed in the CLI fork itself. |
 | 05 | Age encrypt/decrypt roundtrip | BLOCKED | Not yet run — needs `pqc_keygen.js`'s confirmation-injection logic (decaps also requires the 3-button challenge) generalized from keygen to decrypt calls. |
-| 06 | Slot select + reserved reject | ▢ | |
+| 06 | Slot select + reserved reject | ▢ | Unblocked: `--slot` was dead code in the stale CLI fork only; the correct fork (`0c-coder-python-onlykey`) parses and validates it properly, so this can be run as written. |
 | 07 | Age negative (no device) | ▢ | |
 | 08 | Web app build + `test:pqc` | ▢ | |
 | 09 | Derived X-Wing browser roundtrip | ▢ | (may be BLOCKED on container TODO) |
@@ -87,10 +87,20 @@ These passed in software during development; the tester is validating the
 TC-01/02/03/04 completed via an automated Mocha harness (new repo,
 `onlykey-testing`, not part of the four repos in the header table) that
 drives the physical device over its DEBUG-serial button-injection channel
-— no human button presses for any of these. Fixes for TC-04's five bugs
-are committed to `0c-coder-libraries`, `OnlyKey-Firmware`, and
-`python-onlykey` (not yet pushed/merged upstream — these are local commits
-in the `bm-ok` forks pending review). `onlykey-testing/TEST-PLAN.md` has
-the full technical writeup for every bug, with file/line references,
-kept separately since the firmware repos' own history doesn't have a
-natural place for a cross-repo narrative like this.
+— no human button presses for any of these. Firmware fixes for TC-04's
+bugs are committed to `0c-coder-libraries` and `OnlyKey-Firmware` (not
+yet pushed/merged upstream — these are local commits in the `bm-ok` forks
+pending review). `onlykey-testing/TEST-PLAN.md` has the full technical
+writeup for every bug, with file/line references, kept separately since
+the firmware repos' own history doesn't have a natural place for a
+cross-repo narrative like this.
+
+**CLI fork correction (2026-07-23):** the `python-onlykey` clone used
+during initial TC-04 debugging was a stale fork, missing the
+composite-PGP-PQC and derived-X-Wing work this report's header table
+(`68c1c84`) actually describes. Re-cloned as `0c-coder-python-onlykey`
+and re-verified TC-04 against it — see TC-04's row above and
+`onlykey-testing/TEST-PLAN.md` for what changed. No commits were made to
+`0c-coder-python-onlykey`; the earlier `python-onlykey` fixes (message
+type, slot constants) turned out to be specific to the stale clone and
+don't apply to the correct one.
