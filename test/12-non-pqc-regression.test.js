@@ -1,4 +1,6 @@
 const assert = require('assert');
+const fs = require('fs');
+const os = require('os');
 const path = require('path');
 const { execFile } = require('child_process');
 const { OnlyKeyDevice, checkStatus } = require('../lib/device');
@@ -10,27 +12,25 @@ const { enterConfigModeConfirmed, unlockAndConfirm } = require('../lib/pqc_keyge
 // firmware changes - process_packets()'s bounds-check fix, the reserved-slot
 // guard added to OKSETPRIV's dispatch (okcore.cpp ~438-467), and
 // okcrypto_decrypt()'s RESERVED_KEY_WEB_DERIVATION dispatch fix
-// (okcrypto.cpp) - regress the *classic* (non-PQC) slot-label and ECC-key
-// paths sharing the same OKSETSLOT/OKSETPRIV dispatch cases?
+// (okcrypto.cpp) - regress the *classic* (non-PQC) slot-label, ECC-key, and
+// RSA-key paths sharing the same OKSETSLOT/OKSETPRIV dispatch cases?
 //
 // Confirmed via a static read of okcore.cpp before writing this test: classic
 // ECC key generation (ecc_priv_flash(), keytype 1-3 = x25519/nist/secp256k1)
-// has NO CRYPTO_AUTH button-confirmation gate at all - that gate is only
-// entered `if (basetype == KEYTYPE_MLKEM768 || basetype == KEYTYPE_XWING)`
+// and RSA key loading (rsa_priv_flash()) both have NO CRYPTO_AUTH
+// button-confirmation gate at all - that gate is only entered
+// `if (basetype == KEYTYPE_MLKEM768 || basetype == KEYTYPE_XWING)`
 // (okcore.cpp ~5122-5148, the PQC keygen fix from TC-04). So unlike TC-04's
-// PQC keygen, this needs no challenge-digit automation - just config mode
-// (OKSETPRIV/OKSETSLOT's shared `configmode==true` gate, confirmed the same
-// pattern TC-08's hmackeymode/backupkeymode tests already rely on).
+// PQC keygen, none of this needs challenge-digit automation - just config
+// mode (OKSETPRIV/OKSETSLOT's shared `configmode==true` gate, confirmed the
+// same pattern TC-08's hmackeymode/backupkeymode tests already rely on).
 //
-// RSA key testing (also part of TC-15's title) is deliberately out of scope
-// here: `rsa_priv_flash()` also has no CRYPTO_AUTH gate, but loading a real
-// RSA key needs a correctly PGP-armored key fixture (client.py's loadkey()
-// parses real OpenPGP packets, not a raw byte format worth hand-rolling) -
-// and RSA's multi-message chunking is its own local packet_buffer_offset
-// scheme distinct from process_packets()'s shared accumulator this session
-// actually touched, so the regression signal here would be lower value for
-// the added complexity. Flagged as still-open in TEST-PLAN.md rather than
-// silently skipped.
+// RSA needs a real PGP-armored key fixture, not a raw byte format worth
+// hand-rolling - client.py's loadkey() parses actual OpenPGP packets via the
+// same OpenPGP.js bridge the web app uses (pgp_bridge.py). Generated fresh
+// per run with the system `gpg` binary in an isolated GNUPGHOME (never
+// touches the real user keyring), matching the rigor already established
+// for TC-13's GPG identity tests.
 function runCli(args, { timeoutMs = 20000 } = {}) {
     return new Promise((resolve) => {
         execFile(
@@ -81,7 +81,55 @@ async function enterConfigMode() {
     await sleep(500);
 }
 
-describe('Non-PQ regression: slot labels + classic ECC keys (TC-15)', function () {
+function run(cmd, args, { timeoutMs = 20000, env } = {}) {
+    return new Promise((resolve) => {
+        execFile(cmd, args, { timeout: timeoutMs, env: env || process.env }, (err, stdout, stderr) =>
+            resolve({ code: err ? (err.code ?? 1) : 0, stdout, stderr })
+        );
+    });
+}
+
+// Generates a fresh, throwaway RSA-2048 PGP key via the system `gpg` binary
+// in an isolated GNUPGHOME (a tmpdir - never touches the real user
+// keyring), exports it armored, and loads it onto the device via
+// client.py's loadkey() (which parses it through the same OpenPGP.js
+// bridge the web app uses). Returns the CLI-visible stdout/stderr from the
+// load so the caller can assert on it.
+async function generateAndLoadRsaKey({ slot = 1, features = 'd', passphrase = 'tc15-rsa-test-pass' } = {}) {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'onlykey-tc15-rsa-'));
+    const gnupgHome = path.join(tmpDir, 'gnupghome');
+    fs.mkdirSync(gnupgHome, { mode: 0o700 });
+    const keyPath = path.join(tmpDir, 'key.asc');
+
+    try {
+        const gpgEnv = { ...process.env, GNUPGHOME: gnupgHome };
+        const gen = await run('gpg', [
+            '--batch', '--pinentry-mode', 'loopback', '--passphrase', passphrase,
+            '--quick-generate-key', 'TC15 RSA Test <tc15-rsa-test@example.invalid>', 'rsa2048', 'encr', 'never',
+        ], { timeoutMs: 30000, env: gpgEnv });
+        assert.strictEqual(gen.code, 0, `gpg keygen failed:\n${gen.stderr}`);
+
+        const exp = await run('gpg', [
+            '--batch', '--pinentry-mode', 'loopback', '--passphrase', passphrase,
+            '--armor', '--export-secret-keys', 'tc15-rsa-test@example.invalid',
+        ], { timeoutMs: 15000, env: gpgEnv });
+        assert.strictEqual(exp.code, 0, `gpg export failed:\n${exp.stderr}`);
+        fs.writeFileSync(keyPath, exp.stdout);
+
+        const pyScript = [
+            'from onlykey.client import OnlyKey',
+            `with open(${JSON.stringify(keyPath)}) as f:`,
+            '    armored = f.read()',
+            'ok = OnlyKey()',
+            `ok.loadkey(armored, ${JSON.stringify(passphrase)}, slot=${slot}, key_features=${JSON.stringify(features)})`,
+        ].join('\n');
+        return await run(path.join(VENV_BIN, 'python3'), ['-c', pyScript], { timeoutMs: 20000 });
+    } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+}
+
+describe('Non-PQ regression: slot labels, classic ECC + RSA keys (TC-15)', function () {
     this.timeout(90000);
 
     before(async function () {
@@ -108,6 +156,17 @@ describe('Non-PQ regression: slot labels + classic ECC keys (TC-15)', function (
         assert.match(
             `${result.stdout}${result.stderr}`,
             /successfully set ecc key/i,
+            `expected success text, got:\n${result.stdout}${result.stderr}`
+        );
+    });
+
+    it('loads a real RSA-2048 private key on-device, no button confirmation needed', async function () {
+        this.timeout(60000); // gpg keygen + export + multi-message OKSETPRIV load
+        const result = await generateAndLoadRsaKey({ slot: 1, features: 'd' });
+        assert.strictEqual(result.code, 0, `RSA load failed:\n${result.stderr}\n${result.stdout}`);
+        assert.match(
+            `${result.stdout}${result.stderr}`,
+            /successfully set rsa key/i,
             `expected success text, got:\n${result.stdout}${result.stderr}`
         );
     });
