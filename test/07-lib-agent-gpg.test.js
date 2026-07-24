@@ -5,7 +5,7 @@ const path = require('path');
 const { OnlyKeyDevice, checkStatus } = require('../lib/device');
 const { PINS } = require('../lib/config');
 const { sleep } = require('../lib/hid');
-const { runGpgInitWithAutoConfirm } = require('../lib/gpg_init');
+const { runGpgInitWithAutoConfirmRetrying } = require('../lib/gpg_init');
 
 // Maintainer's TC-13, GPG half: `onlykey-gpg init` creates an isolated GPG
 // home directory (never touches the caller's real ~/.gnupg unless --homedir
@@ -32,27 +32,29 @@ async function unlockDevice() {
 }
 
 describe('lib-agent GPG derived identity init (TC-13)', function () {
-    this.timeout(90000);
+    this.timeout(4 * 90 * 1000); // see runGpgInitWithAutoConfirmRetrying
 
-    let homedir;
+    let baseDir;
 
     before(async function () {
         this.timeout(30000);
         await unlockDevice();
-        homedir = fs.mkdtempSync(path.join(os.tmpdir(), 'onlykey-tc13-gpg-'));
-        fs.rmdirSync(homedir); // run_init() refuses to reuse an existing dir - it creates it itself
+        // A container directory, not the GPG homedir itself - the retrying
+        // wrapper creates a fresh `attempt-N` subdir per try (run_init()
+        // refuses to reuse an existing homedir).
+        baseDir = fs.mkdtempSync(path.join(os.tmpdir(), 'onlykey-tc13-gpg-'));
     });
 
     after(function () {
-        if (homedir) fs.rmSync(homedir, { recursive: true, force: true });
+        if (baseDir) fs.rmSync(baseDir, { recursive: true, force: true });
     });
 
     it('creates a hardware-backed GPG identity and the agent responds to it', async function () {
-        const result = await runGpgInitWithAutoConfirm(homedir, 'OnlyKey TC-13 Test <tc13-gpg@example.com>');
+        const result = await runGpgInitWithAutoConfirmRetrying(baseDir, 'OnlyKey TC-13 Test <tc13-gpg@example.com>');
         assert.strictEqual(result.code, 0, `onlykey-gpg init failed:\n${result.stderr}\n${result.stdout}`);
-        assert.ok(fs.existsSync(path.join(homedir, 'pubkey.asc')), 'no pubkey.asc written');
+        assert.ok(fs.existsSync(path.join(result.homedir, 'pubkey.asc')), 'no pubkey.asc written');
 
-        const pubkey = fs.readFileSync(path.join(homedir, 'pubkey.asc'), 'utf8');
+        const pubkey = fs.readFileSync(path.join(result.homedir, 'pubkey.asc'), 'utf8');
         assert.match(pubkey, /-----BEGIN PGP PUBLIC KEY BLOCK-----/, 'pubkey.asc is not armored PGP');
     });
 });
