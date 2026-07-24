@@ -18,5 +18,8 @@
   },
   "devDependencies": {
     "mocha": "^10.7.3"
+  },
+  "overrides": {
+    "node-hid": "^3.4.0"
   }
 }
