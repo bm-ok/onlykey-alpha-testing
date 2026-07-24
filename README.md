@@ -14,26 +14,29 @@ Repos this suite depends on are expected as siblings of this directory:
 
 ```
 onlykey/
-  arduino-1.6.5-r5-teensy_127/   # firmware
-  0c-coder-python-onlykey/       # onlykey-cli, age-plugin-onlykey (correct fork - see below)
+  arduino-1.6.5-r5-teensy_127/   # firmware sketch (make docker-build)
+  libraries/                     # firmware library sources (okcore.cpp, okcrypto.cpp, fido2/, ...)
+  python-onlykey/                # onlykey-cli, age-plugin-onlykey
+  lib-agent/                     # onlykey-agent, onlykey-gpg (SSH/GPG derived-key tooling)
   okpqc-venv/                    # Python venv with the above installed editable
   onlykey-testing/                # this repo
 ```
 
-There are two `python-onlykey` clones in this directory tree:
-`0c-coder-python-onlykey` is the one that matches the build under test
-(`OnlyKey-PQC-Test-Report.md`'s header table, master SHA `68c1c84` at time
-of writing) - it has the composite-PGP-PQC and derived-X-Wing work that
-`python-onlykey` (the original clone) doesn't. `okpqc-venv`'s editable
-`onlykey` install must point at `0c-coder-python-onlykey`:
+`okpqc-venv`'s editable installs:
 
 ```bash
-okpqc-venv/bin/pip install -e ../0c-coder-python-onlykey
+okpqc-venv/bin/pip install -e ../python-onlykey -e ../lib-agent -e ../lib-agent/agents/onlykey
 ```
 
 ```bash
 npm install
 ```
+
+`FIDO2Client/` and `node-onlykey-fido2/` (if present as siblings) are
+optional, read-only reference clones used while developing the FIDO2 tests
+- not required to run this suite. The actual runtime FIDO2 client
+(`@vincss-public-projects/fido2-client` in `package.json`) is pulled from
+GitHub directly via `npm install`.
 
 Requires a physical OnlyKey (6-button dev board / Classic / Color - not
 DUO) connected over USB, with its DEBUG-serial (SEREMU) HID interface
@@ -58,7 +61,7 @@ To run a single spec file in isolation (bypassing `.mocharc.json`'s glob,
 which otherwise unions with any file you pass on the command line):
 
 ```bash
-echo '{}' > /tmp/empty.mocharc.json
+echo '{"timeout": 30000, "slow": 10000}' > /tmp/empty.mocharc.json
 npx mocha --config /tmp/empty.mocharc.json test/01-pqc-keygen.test.js
 ```
 
@@ -68,9 +71,16 @@ npx mocha --config /tmp/empty.mocharc.json test/01-pqc-keygen.test.js
   it - send the same HID commands `OnlyKeyWizard.js`/`OnlyKeyComm.js` send,
   or fall back to `lib/hid.js`'s `SeremuChannel` (simulated button presses)
   for anything DEBUG-only with no app equivalent.
-- **CLI tooling** (`onlykey-cli`, `age-plugin-onlykey`, `onlykey-agent`):
-  already scriptable - shell out to the real binaries directly
-  (`child_process`/`execFile`/`spawn`), never reimplement their protocol.
+- **CLI tooling** (`onlykey-cli`, `age-plugin-onlykey`, `onlykey-agent`,
+  `onlykey-gpg`): already scriptable - shell out to the real binaries
+  directly (`child_process`/`execFile`/`spawn`), never reimplement their
+  protocol.
+- **Device-facing calls are bounded and response-driven**: every
+  device-facing wait should cap out around 30 seconds and proceed based on
+  an actual response/status from the device, not a blind `sleep()` guess.
+  A genuinely wedged device and a slow-but-working call look identical from
+  the outside otherwise - a hard timeout plus a real response is what tells
+  them apart.
 
 Full rationale in [TEST-PLAN.md](TEST-PLAN.md).
 
@@ -83,9 +93,27 @@ Full rationale in [TEST-PLAN.md](TEST-PLAN.md).
 - `lib/pqc_keygen.js` - drives `age-plugin-onlykey`'s PQC keygen, which
   requires the device to be in config mode and blocks on a 3-button
   confirmation challenge; injects the confirm presses automatically by
-  parsing them out of the CLI's own stderr.
-- `lib/config.js` - shared test PINs, repo paths.
-- `lib/py/pin_advance.py` - thin wrapper around `python-onlykey`'s own
-  `OnlyKey`/`Message` classes for the bare `OKSETPIN`/`OKSETPDPIN`/
-  `OKSETSDPIN` messages used during setup.
-- `test/` - Mocha specs, one file per feature area.
+  parsing them out of the CLI's own stderr. Also exports the shared
+  `enterConfigModeConfirmed()`/`unlockAndConfirm()` helpers most other
+  device-facing tests build on.
+- `lib/pqc_decrypt.js` - drives the age encrypt(host)/decrypt(device)
+  round-trip for slot-based X-Wing identities.
+- `lib/gpg_init.js` - drives `onlykey-gpg init` end-to-end, scraping and
+  answering its 3-digit challenge live from stdout.
+- `lib/age_pqc.js` - host-side X-Wing/ML-KEM math (recipient building,
+  encapsulation, the derived split-decapsulation combiner) - the JS twin of
+  `python-onlykey`'s `derived_xwing.py`, verified byte-for-byte identical
+  against a fixed vector generated from the Python reference.
+- `lib/fido2/` - a from-scratch (not copy-pasted) FIDO2/CTAP2 client built
+  on `@vincss-public-projects/fido2-client`, covering both the OKCONNECT
+  vendor-command-smuggling transport onlyagent.app's browser flow uses
+  (`client.js`'s `ctaphidViaWebauthn()`/`deriveXwing()`) and genuine
+  standard WebAuthn ceremonies (`makeCredential`/`getAssertion` directly).
+- `lib/config.js` - shared test PINs, repo/venv paths.
+- `lib/py/` - small Python helpers shelled out to from Node for things
+  `python-onlykey`'s own client already implements correctly (PIN-advance
+  messages, HID buffer draining, fixture/vector generation) rather than
+  reimplementing them in JS.
+- `test/` - Mocha specs, one file per feature area; see
+  [TEST-PLAN.md](TEST-PLAN.md) for which maintainer test case(s) each file
+  covers.
