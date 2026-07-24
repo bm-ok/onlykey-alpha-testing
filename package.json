@@ -8,7 +8,10 @@
     "test": "mocha"
   },
   "dependencies": {
-    "node-hid": "^3.4.0"
+    "node-hid": "^3.4.0",
+    "@noble/curves": "^2.2.0",
+    "@noble/hashes": "^2.2.0",
+    "@noble/post-quantum": "^0.6.1"
   },
   "devDependencies": {
     "mocha": "^10.7.3"
