@@ -1,23 +1,27 @@
 const assert = require('assert');
-const path = require('path');
-const { spawn } = require('child_process');
 const { OnlyKeyDevice, checkStatus } = require('../lib/device');
 const { PINS } = require('../lib/config');
 const { sleep } = require('../lib/hid');
+const { FIDO2Client, connect } = require('../lib/fido2/client');
 
 // TC-09/10 groundwork: the OKCONNECT handshake over FIDO2/CTAP2 - the same
 // transport onlykey-pgp.js uses in the browser (WebAuthn getAssertion(),
 // with the credential ID smuggling a vendor command), driven here from Node
 // via lib/fido2/client.js. This is the foundation TC-09/10's real device
-// derive/decap calls (okcrypto_xwing_web_derive(), okcrypto.cpp) will build
-// on - proving the transport itself works before adding the age-pqc.js math
-// on top.
+// derive/decap calls (okcrypto_xwing_web_derive(), okcrypto.cpp) build on -
+// proving the transport itself works before adding the age-pqc.js math on
+// top (see test/10-fido2-xwing-derive.test.js for the full round-trip).
 //
-// Runs lib/fido2/run_connect.js as a child process rather than calling
-// connect() in-process - see that file's doc comment: the FIDO2 client's
-// native HID binding segfaults during process teardown after its own work
-// is already done, and isolating it here keeps that from taking down the
-// whole Mocha run.
+// Runs in-process (no longer isolated in a child process): the FIDO2
+// client's native HID binding used to segfault during process teardown
+// after its own work was already done - root-caused via gdb to a
+// use-after-free race in node-hid@2.2.0's bundled hidapi (a background read
+// worker hitting "device disconnected" during close and then crashing while
+// logging that error). Fixed by forcing the whole dependency tree onto the
+// newer node-hid@3.4.0 this repo already depends on (package.json's
+// "overrides") instead of the older version @vincss-public-projects/fido2-client
+// pulls in on its own - confirmed clean (exit 0, no crash) across repeated
+// runs after the override, including under the full derive round-trip.
 async function unlockDevice() {
     const device = await new OnlyKeyDevice().connect();
     device.restartDevice();
@@ -34,34 +38,6 @@ async function unlockDevice() {
     await sleep(500);
 }
 
-function runConnectHandshake({ timeoutMs = 20000 } = {}) {
-    return new Promise((resolve, reject) => {
-        const child = spawn('node', [path.join(__dirname, '..', 'lib', 'fido2', 'run_connect.js')], {
-            timeout: timeoutMs,
-        });
-        let stdout = '';
-        let stderr = '';
-        child.stdout.on('data', (d) => { stdout += d.toString(); });
-        child.stderr.on('data', (d) => { stderr += d.toString(); });
-        child.on('close', () => {
-            // Deliberately not checking the exit code - see this file's and
-            // run_connect.js's doc comments: a segfault during native HID
-            // cleanup is expected *after* the JSON line is already printed,
-            // and isn't itself a failure.
-            const line = stdout.trim().split('\n').find((l) => l.startsWith('{'));
-            if (!line) {
-                return reject(new Error(`No JSON result from run_connect.js (crashed before printing?):\nstdout: ${stdout}\nstderr: ${stderr}`));
-            }
-            try {
-                resolve(JSON.parse(line));
-            } catch (e) {
-                reject(new Error(`Could not parse run_connect.js output: ${line}`));
-            }
-        });
-        child.on('error', reject);
-    });
-}
-
 describe('FIDO2/CTAP2 OKCONNECT handshake (TC-09/10 groundwork)', function () {
     this.timeout(60000);
 
@@ -71,21 +47,23 @@ describe('FIDO2/CTAP2 OKCONNECT handshake (TC-09/10 groundwork)', function () {
     });
 
     it('establishes a shared secret and reports device status over FIDO2', async function () {
-        const result = await runConnectHandshake();
-        assert.strictEqual(result.ok, true, `handshake failed: ${result.error}`);
-        assert.match(result.sharedSecret, /^[0-9a-f]{64}$/, 'sharedSecret should be a 32-byte hex string');
-        assert.match(result.okPub, /^[0-9a-f]{64}$/, 'okPub should be a 32-byte hex string');
+        const fido2 = new FIDO2Client(false);
+        const result = await connect(fido2);
+        assert.match(Buffer.from(result.sharedSecret).toString('hex'), /^[0-9a-f]{64}$/);
+        assert.match(Buffer.from(result.okPub).toString('hex'), /^[0-9a-f]{64}$/);
         assert.match(result.status, /^UNLOCKED/, `expected an UNLOCKED status, got: ${result.status}`);
         assert.match(result.fwVersion, /^v\d+\.\d+\.\d+/, `expected a version string, got: ${result.fwVersion}`);
     });
 
     it('is repeatable - a second handshake also succeeds with a fresh shared secret', async function () {
-        const first = await runConnectHandshake();
-        const second = await runConnectHandshake();
-        assert.strictEqual(first.ok, true);
-        assert.strictEqual(second.ok, true);
+        const fido2 = new FIDO2Client(false);
+        const first = await connect(fido2);
+        const second = await connect(fido2);
         assert.strictEqual(first.status, second.status);
         // Fresh ephemeral keypair each handshake -> different shared secret.
-        assert.notStrictEqual(first.sharedSecret, second.sharedSecret);
+        assert.notStrictEqual(
+            Buffer.from(first.sharedSecret).toString('hex'),
+            Buffer.from(second.sharedSecret).toString('hex')
+        );
     });
 });
