@@ -1,0 +1,14 @@
+{
+  "name": "nwjs",
+  "version": "1.0.0",
+  "description": "NW.js SDK environment for AI-assisted debugging",
+  "license": "ISC",
+  "type": "commonjs",
+  "main": "index.js",
+  "scripts": {
+    "start": "nw . --user-data-dir=./udata --remote-debugging-port=9222"
+  },
+  "devDependencies": {
+    "nw": "^0.114.0-sdk"
+  }
+}
