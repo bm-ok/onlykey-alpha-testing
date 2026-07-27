@@ -3,10 +3,9 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { execFile } = require('child_process');
-const { OnlyKeyDevice, checkStatus } = require('../lib/device');
-const { PINS, VENV_BIN } = require('../lib/config');
-const { SeremuChannel, sleep } = require('../lib/hid');
-const { enterConfigModeConfirmed, unlockAndConfirm } = require('../lib/pqc_keygen');
+const { OnlyKeyDevice, checkStatus, unlockDevice } = require('../lib/device');
+const { VENV_BIN } = require('../lib/config');
+const { enterConfigMode } = require('../lib/pqc_keygen');
 
 // Maintainer's TC-15 (non-PQ regression): does this session's PQC-era
 // firmware changes - process_packets()'s bounds-check fix, the reserved-slot
@@ -42,44 +41,17 @@ function runCli(args, { timeoutMs = 20000 } = {}) {
     });
 }
 
-async function unlockDevice() {
-    const device = await new OnlyKeyDevice().connect();
-    device.restartDevice();
-    device.close();
-    await sleep(3000);
-    await device.connect();
-    device.unlockWithPrimaryPin(PINS.primary);
-    for (let i = 0; i < 10; i++) {
-        await sleep(500);
-        const status = await checkStatus({ retries: 0 });
-        if (status.state === 'unlocked') break;
-    }
-    device.close();
-    await sleep(500);
-}
-
 // Same shared-config-mode-session pattern as TC-08's backup/HMAC tests -
 // configmode is a device-side flag with no explicit exit besides reboot, so
 // entering it once here and reusing it across both its() below is both
-// faster and matches established harness style. Unlike TC-08's version,
-// this wraps the body in try/finally: if unlockAndConfirm()/
-// enterConfigModeConfirmed() throws (as happened live - see TEST-PLAN.md),
-// an unclosed SeremuChannel keeps a live HID handle open, which keeps
-// Node's event loop alive - mocha still prints its failure report on
-// schedule, but the process then hangs indefinitely afterward instead of
-// exiting. Confirmed live: this is exactly what happened, not a genuinely
-// stuck operation.
-async function enterConfigMode() {
-    const channel = new SeremuChannel();
-    await channel.connect();
-    try {
-        await unlockAndConfirm(channel, PINS.primary);
-        await enterConfigModeConfirmed(channel, PINS.primary);
-    } finally {
-        channel.close();
-    }
-    await sleep(500);
-}
+// faster and matches established harness style. Now lib/pqc_keygen.js's
+// shared enterConfigMode() helper (this file and TC-08 previously
+// duplicated the same unlock+long-press-6 sequence locally); it already
+// wraps the body in try/finally itself, for the same reason this file's
+// local version did - an unclosed SeremuChannel on failure keeps a live
+// HID handle open, which keeps Node's event loop alive and hangs the
+// process after mocha's failure report instead of exiting (confirmed
+// live - see TEST-PLAN.md - not a genuinely stuck operation).
 
 function run(cmd, args, { timeoutMs = 20000, env } = {}) {
     return new Promise((resolve) => {

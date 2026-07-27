@@ -6,7 +6,8 @@
   "type": "commonjs",
   "main": "index.js",
   "scripts": {
-    "start": "nw . --user-data-dir=./udata --remote-debugging-port=9222"
+    "start": "nw . --user-data-dir=./udata --remote-debugging-port=9222 --disable-gpu --disable-software-rasterizer --disable-dev-shm-usage",
+    "ensure": "node ensure.js"
   },
   "devDependencies": {
     "nw": "^0.114.0-sdk"

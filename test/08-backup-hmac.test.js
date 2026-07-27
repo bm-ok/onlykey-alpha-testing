@@ -3,10 +3,9 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { execFile } = require('child_process');
-const { OnlyKeyDevice, checkStatus } = require('../lib/device');
-const { PINS, VENV_BIN } = require('../lib/config');
-const { SeremuChannel, sleep } = require('../lib/hid');
-const { enterConfigModeConfirmed, unlockAndConfirm } = require('../lib/pqc_keygen');
+const { OnlyKeyDevice, checkStatus, unlockDevice } = require('../lib/device');
+const { VENV_BIN } = require('../lib/config');
+const { enterConfigMode } = require('../lib/pqc_keygen');
 
 // Maintainer's TC-13, backup/HMAC half. Scope note (see TEST-PLAN.md): a
 // full backup-create -> restore round-trip isn't testable from this repo -
@@ -24,38 +23,15 @@ const { enterConfigModeConfirmed, unlockAndConfirm } = require('../lib/pqc_keyge
 // rejected cleanly (`_parse_backup_data()`'s SHA256 check runs entirely
 // client-side before anything is ever sent to the device, so this is safe -
 // no restore actually reaches the device on this path).
-async function unlockDevice() {
-    const device = await new OnlyKeyDevice().connect();
-    device.restartDevice();
-    device.close();
-    await sleep(3000);
-    await device.connect();
-    device.unlockWithPrimaryPin(PINS.primary);
-    for (let i = 0; i < 10; i++) {
-        await sleep(500);
-        const status = await checkStatus({ retries: 0 });
-        if (status.state === 'unlocked') break;
-    }
-    device.close();
-    await sleep(500);
-}
-
 // Both hmackeymode and backupkeymode writes hit OKSETSLOT's
 // `mod_keys_enabled && configmode == false` guard on this device's current
 // state (confirmed live - both failed with "Error not in config mode"
 // outside config mode). Entered once here and shared by both tests below,
 // since configmode is a device-side flag that persists across separate CLI
 // processes until the device relocks - same long-press-6 + re-unlock dance
-// TC-04's keygen automation uses.
-async function enterConfigMode() {
-    const channel = new SeremuChannel();
-    await channel.connect();
-    await unlockAndConfirm(channel, PINS.primary);
-    await enterConfigModeConfirmed(channel, PINS.primary);
-    channel.close();
-    await sleep(500);
-}
-
+// TC-04's keygen automation uses. Now lib/pqc_keygen.js's shared
+// enterConfigMode() helper (this file previously duplicated the same
+// unlock+long-press-6 sequence locally, as did test/12).
 function runCli(args, { timeoutMs = 15000 } = {}) {
     return new Promise((resolve) => {
         execFile(

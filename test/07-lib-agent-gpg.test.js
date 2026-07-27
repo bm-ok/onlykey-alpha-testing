@@ -2,9 +2,7 @@ const assert = require('assert');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { OnlyKeyDevice, checkStatus } = require('../lib/device');
-const { PINS } = require('../lib/config');
-const { sleep } = require('../lib/hid');
+const { OnlyKeyDevice, checkStatus, unlockDevice } = require('../lib/device');
 const { runGpgInitWithAutoConfirmRetrying } = require('../lib/gpg_init');
 
 // Maintainer's TC-13, GPG half: `onlykey-gpg init` creates an isolated GPG
@@ -15,22 +13,6 @@ const { runGpgInitWithAutoConfirmRetrying } = require('../lib/gpg_init');
 // responds to `gpg --list-secret-keys`. Like TC-13's SSH half, this is a
 // regression check that this session's firmware/CLI PQC-era changes didn't
 // break the existing (non-PQC) GPG derived-key path.
-async function unlockDevice() {
-    const device = await new OnlyKeyDevice().connect();
-    device.restartDevice();
-    device.close();
-    await sleep(3000);
-    await device.connect();
-    device.unlockWithPrimaryPin(PINS.primary);
-    for (let i = 0; i < 10; i++) {
-        await sleep(500);
-        const status = await checkStatus({ retries: 0 });
-        if (status.state === 'unlocked') break;
-    }
-    device.close();
-    await sleep(500);
-}
-
 describe('lib-agent GPG derived identity init (TC-13)', function () {
     this.timeout(4 * 90 * 1000); // see runGpgInitWithAutoConfirmRetrying
 

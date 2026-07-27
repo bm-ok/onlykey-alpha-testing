@@ -1,8 +1,7 @@
 const assert = require('assert');
 const crypto = require('crypto');
-const { OnlyKeyDevice, checkStatus } = require('../lib/device');
-const { PINS } = require('../lib/config');
-const { SeremuChannel, sleep } = require('../lib/hid');
+const { OnlyKeyDevice, checkStatus, unlockDevice } = require('../lib/device');
+const { SeremuChannel } = require('../lib/hid');
 const { FIDO2Client, deriveXwing, withSimulatedPresses } = require('../lib/fido2/client');
 const agePqc = require('../lib/age_pqc');
 
@@ -22,22 +21,6 @@ const agePqc = require('../lib/age_pqc');
 // Runs in-process (no longer isolated in a child process) - see
 // test/09-fido2-connect.test.js's doc comment for the node-hid native-crash
 // root cause and fix.
-async function unlockDevice() {
-    const device = await new OnlyKeyDevice().connect();
-    device.restartDevice();
-    device.close();
-    await sleep(3000);
-    await device.connect();
-    device.unlockWithPrimaryPin(PINS.primary);
-    for (let i = 0; i < 10; i++) {
-        await sleep(500);
-        const status = await checkStatus({ retries: 0 });
-        if (status.state === 'unlocked') break;
-    }
-    device.close();
-    await sleep(500);
-}
-
 // deriveXwing()'s REQ_PRESS variants need a real CTAP2 "user presence"
 // confirmation (device.cpp's ctap_user_presence_test()) while the call is
 // in flight - opens its own SEREMU channel and drives withSimulatedPresses()

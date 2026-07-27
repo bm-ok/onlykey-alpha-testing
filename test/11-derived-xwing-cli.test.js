@@ -3,9 +3,8 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { execFile } = require('child_process');
-const { OnlyKeyDevice, checkStatus } = require('../lib/device');
-const { PINS, VENV_BIN } = require('../lib/config');
-const { sleep } = require('../lib/hid');
+const { OnlyKeyDevice, checkStatus, unlockDevice } = require('../lib/device');
+const { VENV_BIN } = require('../lib/config');
 
 // Maintainer's TC-16/TC-17: the CLI-side derived (label-based) X-Wing path -
 // `age-plugin-onlykey --derived --label <name> ...` - no slot, the key is
@@ -57,22 +56,6 @@ async function derivedIdentity(label) {
     const identityLine = result.stdout.split('\n').find((l) => l.startsWith('AGE-PLUGIN-ONLYKEY-1'));
     assert.ok(identityLine, `no derived identity line in:\n${result.stdout}`);
     return identityLine.trim();
-}
-
-async function unlockDevice() {
-    const device = await new OnlyKeyDevice().connect();
-    device.restartDevice();
-    device.close();
-    await sleep(3000);
-    await device.connect();
-    device.unlockWithPrimaryPin(PINS.primary);
-    for (let i = 0; i < 10; i++) {
-        await sleep(500);
-        const status = await checkStatus({ retries: 0 });
-        if (status.state === 'unlocked') break;
-    }
-    device.close();
-    await sleep(500);
 }
 
 describe('CLI derived (label-based) X-Wing (TC-16/TC-17)', function () {

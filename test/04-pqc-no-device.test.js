@@ -21,6 +21,13 @@ const SLOT = 101;
 // (isOnlyKeyPresent(), same node-hid device list lib/hid.js's SeremuChannel
 // already relies on elsewhere) so it only proceeds once the disconnect (and
 // later reconnect) actually happened.
+// Skipped by default in normal test runs: it requires a real physical
+// USB unplug/replug (see the module comment above - no software trick
+// reliably fakes this without root), so an unattended `npm test` run
+// would otherwise just sit at the "please unplug" prompt until its
+// timeout. Opt in explicitly with ONLYKEY_TEST_PHYSICAL_UNPLUG=yes when
+// actually testing this path (e.g. before shipping a production key) or
+// running it on its own.
 describe('PQC X-Wing decrypt with no device attached (TC-07)', function () {
     this.timeout(5 * 60 * 1000);
 
@@ -29,6 +36,12 @@ describe('PQC X-Wing decrypt with no device attached (TC-07)', function () {
 
     before(async function () {
         this.timeout(4 * 90 * 1000);
+
+        if (process.env.ONLYKEY_TEST_PHYSICAL_UNPLUG !== 'yes') {
+            // eslint-disable-next-line no-console
+            console.log('    (skipping TC-07 - requires a real physical USB unplug/replug; set ONLYKEY_TEST_PHYSICAL_UNPLUG=yes to run it)');
+            this.skip();
+        }
 
         if (!isOnlyKeyPresent()) {
             throw new Error('OnlyKey not detected - plug it in before running TC-07 (needs it present to prepare the ciphertext first)');

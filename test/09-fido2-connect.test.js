@@ -1,7 +1,5 @@
 const assert = require('assert');
-const { OnlyKeyDevice, checkStatus } = require('../lib/device');
-const { PINS } = require('../lib/config');
-const { sleep } = require('../lib/hid');
+const { OnlyKeyDevice, checkStatus, unlockDevice } = require('../lib/device');
 const { FIDO2Client, connect } = require('../lib/fido2/client');
 
 // TC-09/10 groundwork: the OKCONNECT handshake over FIDO2/CTAP2 - the same
@@ -22,22 +20,6 @@ const { FIDO2Client, connect } = require('../lib/fido2/client');
 // "overrides") instead of the older version @vincss-public-projects/fido2-client
 // pulls in on its own - confirmed clean (exit 0, no crash) across repeated
 // runs after the override, including under the full derive round-trip.
-async function unlockDevice() {
-    const device = await new OnlyKeyDevice().connect();
-    device.restartDevice();
-    device.close();
-    await sleep(3000);
-    await device.connect();
-    device.unlockWithPrimaryPin(PINS.primary);
-    for (let i = 0; i < 10; i++) {
-        await sleep(500);
-        const status = await checkStatus({ retries: 0 });
-        if (status.state === 'unlocked') break;
-    }
-    device.close();
-    await sleep(500);
-}
-
 describe('FIDO2/CTAP2 OKCONNECT handshake (TC-09/10 groundwork)', function () {
     this.timeout(60000);
 

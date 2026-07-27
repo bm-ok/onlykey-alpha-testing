@@ -1,9 +1,8 @@
 const assert = require('assert');
 const path = require('path');
 const { execFile } = require('child_process');
-const { OnlyKeyDevice, checkStatus } = require('../lib/device');
-const { PINS, VENV_BIN } = require('../lib/config');
-const { sleep } = require('../lib/hid');
+const { OnlyKeyDevice, checkStatus, unlockDevice } = require('../lib/device');
+const { VENV_BIN } = require('../lib/config');
 
 // Maintainer's TC-13: confirm the PQC-era firmware/CLI changes this session
 // made (process_packets() bounds-check fix, okcrypto_decrypt() dispatch
@@ -18,22 +17,6 @@ const { sleep } = require('../lib/hid');
 // "SSH/GPG Derive Key") as onlykey-pgp.js's production web-app PGP flow and
 // the age-pqc.js groundwork's eventual real device wiring - proving it still
 // works end-to-end is real regression coverage, not a toy check.
-async function unlockDevice() {
-    const device = await new OnlyKeyDevice().connect();
-    device.restartDevice();
-    device.close();
-    await sleep(3000);
-    await device.connect();
-    device.unlockWithPrimaryPin(PINS.primary);
-    for (let i = 0; i < 10; i++) {
-        await sleep(500);
-        const status = await checkStatus({ retries: 0 });
-        if (status.state === 'unlocked') break;
-    }
-    device.close();
-    await sleep(500);
-}
-
 function runOnlykeyAgent(identity, { timeoutMs = 20000 } = {}) {
     return new Promise((resolve) => {
         execFile(
