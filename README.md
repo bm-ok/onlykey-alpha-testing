@@ -42,6 +42,22 @@ Requires a physical OnlyKey (6-button dev board / Classic / Color - not
 DUO) connected over USB, with its DEBUG-serial (SEREMU) HID interface
 enabled in the flashed firmware build.
 
+**Reflashing the firmware wipes the device back to factory defaults** (no
+PIN set, `checkStatus()` reports `uninitialized`) - confirmed live, a fresh
+`make docker-build` + reflash is indistinguishable from a brand-new device
+as far as this suite is concerned. Every test in this repo other than
+`test/00-setup.test.js` assumes a PIN is already set, so re-run initial
+setup (see below) after every reflash before running anything else.
+
+A reflash also resets `derived_key_challenge_mode` ("derived keys per site
+without touch") back to off, but `.derived-key-challenge-mode-cache.json`
+(written by `lib/gui_helpers.js`'s `setDerivedKeyChallengeMode()` to avoid
+needlessly re-entering config mode) doesn't know that - confirmed live,
+this caused a real false-negative (cached "already 8" skipped re-enabling
+it on a freshly-reflashed device that actually needed it). Delete that
+cache file after a reflash, or just delete it whenever a GUI test
+inexplicably gets `CTAP2_ERR_EXTENSION_NOT_SUPPORTED`.
+
 ## Running
 
 ```bash
