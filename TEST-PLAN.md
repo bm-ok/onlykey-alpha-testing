@@ -145,6 +145,25 @@ before/after comparison possible.
 | ENC-03 | Confirm PIN/profile data at rest on the Travel (non-encrypted) build for contrast | ❓ needs research | Same dump technique against SETUP-06's build; expect the difference to be visible, which is what proves ENC-02 is meaningful rather than trivially true on both. |
 | ENC-04 | PQC keygen/decrypt correctly no-ops on non-encrypted profile | ❓ needs research | The maintainer's report claims `set_private` returns early on `NONENCRYPTEDPROFILE`, blocking PQC keygen/decrypt (see Gotchas / risk register item 3 in `./OnlyKey-PQC-Test-Report.md`). Worth a dedicated negative test once SETUP-06's build exists: attempt TC-04 against it and confirm a clean no-op/error, not a hang or crash. |
 
+### Classic PGP encrypt/decrypt pages — NEW (2026-08-01)
+
+`test/18-gui-encrypt-decrypt.test.js`. The web app's `/app/encrypt` and
+`/app/decrypt` pages had no coverage at all, even though they share a transport
+(`onlykey-pgp.js`'s `u2fSignBuffer` + `OKPING` polling) with TC-11's composite
+PGP-PQC page — so a regression in the shared parts shows up here first, and far
+more cheaply.
+
+| ID | Title | Status | Notes |
+|----|-------|--------|-------|
+| ENC-05 | Encrypt Only round-trips through the Node shim | ✅ confirmed (2026-08-01) | `lib/fido2/pgp_env.js` exposes the real `onlykey-pgp.js` to Node the same way `browser_env.js` does for `onlykey-3rd-party.js` — `app.onlykeyApi.pgp().api()`, no reimplementation. Encrypt to a throwaway kbpgp ECC key, decrypt locally, assert the exact plaintext. ~2.7 s, no device. |
+| ENC-06 | Encrypt Only round-trips through the real page | ✅ confirmed (2026-08-01) | Drives `/app/encrypt` in nwjs, decrypts the result in Node. ~5 s. |
+| ENC-07 | Distinct same-length plaintexts stay distinct | ✅ confirmed (2026-08-01) | Deliberately the assertion `test/14` lacked when the derived-key collision got past it: two equal-length plaintexts must each decrypt back to **their own** value, not merely to something. |
+| ENC-08 | Browser and Node shim agree | ✅ confirmed (2026-08-01) | Compares decrypted plaintext, never ciphertext — PGP picks a fresh session key per run, so identical ciphertext would indicate a broken RNG. |
+| ENC-09 | Decrypt Only / Sign Only against the device | ⬜ not yet built | Unblocked but not written. The web app hardcodes the slots: `onlykey-pgp.js`'s `slotid()` sends **RSA slot 1 for `OKDECRYPT`, slot 2 for `OKSIGN`**, and `okcrypto.cpp` routes `buffer[5] < 101` to `okcore_flashget_RSA()`. `test/12`'s `generateAndLoadRsaKey({ slot: 1, features: 'd' })` already loads a real gpg-generated RSA-2048 key into exactly that slot, so the fixture exists — reuse it and paste the matching armored **public** key into the page. Note slot 1 is also where TC-11 puts its composite PQC key; both tests re-provision it, so they must not interleave. |
+
+Only "Encrypt Only" avoids the device (kbpgp encrypts to a recipient public key
+and stops), which is why ENC-05–08 need nothing plugged in and ENC-09 does.
+
 ## 2. Firmware (maintainer TC-01–TC-03, TC-15)
 
 | ID | Title | Status | Notes |
@@ -236,12 +255,101 @@ This is in the **deployed bundle**, not only the `src/` copy — the built
 
 The newer age-derive path is **not** affected: it hashes `digestArray(labelBytes)`
 with properly encoded bytes. The fix is the same treatment for these callers —
-encode with `TextEncoder` before hashing — but note that changing the encoding
-**changes every previously derived key**, so it is a migration, not a patch.
+encode with `TextEncoder` before hashing.
+
+Changing the encoding **changes every previously derived key**, which would
+normally make this a migration rather than a patch. The maintainer has since
+confirmed that is acceptable — nothing depends on those keys yet, and breaking
+changes to the derived-key scheme are fine at this point. He also expects to
+revisit the scheme anyway, since it currently derives with SHA-256 where the
+design calls for HKDF. So the fix is applied as a plain fix, with no migration
+path, and the hashing method itself is his open design item, not ours.
+
+**Fix applied and verified** (2026-08-01) in
+`onlykey.github.io/src/onlykey-fido2/onlykey/onlykey-3rd-party.js` as
+`derivationInputBytes()`, routed through both derivation sites. Verified end to
+end in the real browser: `"spike-label"` and `"other-label"` now produce
+different passwords. `tools/repro-derive-collision.js` is the regression check —
+exit 1 against the unfixed library, exit 0 against the fixed one.
 
 `test/14-gui-password-generator.test.js` cannot catch this: it asserts only
 that a password came back without page errors, never that different inputs
 produce different outputs.
+
+## The `ctap_buffer` / large-response ceiling — root cause found
+
+Found 2026-08-01, while reading the **classic** PGP path (`onlykey-pgp.js`) for
+the new `/app/encrypt` + `/app/decrypt` coverage. That path is the only
+already-working example of moving more than a couple of hundred bytes through
+the WebAuthn bridge, so it is the reference for what the transport can and
+cannot do. Two separate ceilings, at different layers:
+
+**1. The assertion's byte string is sized from the wrong variable.**
+`libraries/fido2/ctap.cpp:1301` declares `uint8_t sigder[514]`, and
+`ctap_end_get_assertion()` then picks its length like this:
+
+```c
+if ((pending_operation==CTAP2_ERR_DATA_READY || pending_operation==CTAP2_ERR_DATA_WIPE)
+    && large_resp_buffer_offset+1 < sizeof(sigder)) {
+    sigder_sz = large_resp_buffer_offset+1;
+} else sigder_sz = 72;
+```
+
+`large_resp_buffer_offset` is the size of the **whole** stored response, not
+the number of bytes actually written into `sigder` by this round trip. So:
+
+- a response of 513 B or more takes the `else` branch and returns **72 bytes**,
+  whatever was written;
+- the chunking added to `send_stored_response()` (`ok_extension.cpp`,
+  `MAX_LARGE_RESP_CHUNK 500`) is therefore **inert by construction** — it can
+  write a correct 500-byte chunk and still have the length reported as 72.
+
+That is why a 3309-byte ML-DSA-65 signature cannot come back regardless of
+`LARGE_RESP_BUFFER_SIZE`. The buffer was never the binding constraint.
+
+`extensions.cpp:39` already exposes `uint16_t output_buffer_offset` as a
+non-static global holding exactly the byte count `extension_writeback()` wrote,
+and `extend_fido2()` puts a status byte at `output[0]` with data from
+`output+1`. So the length that is actually correct here is
+`output_buffer_offset + 1`. Not yet applied — see the caveat below.
+
+**2. The host does not reassemble chunks.** Even with the length fixed, the web
+app's retrieval loop takes the first poll that returns an array as the complete
+answer. `onlykey-pgp.js`'s `doPinTimer()`:
+
+```js
+if (results instanceof Array) { ... return resolve(results); }
+```
+
+There is no accumulator across `msg_polling()` calls. Multi-chunk retrieval
+therefore needs a host-side change too, not only a firmware one — the device
+cannot deliver it unilaterally.
+
+**Relevant to the classic path as well, not just PQC.** Sizes on the shared
+`OKSIGN`/`OKDECRYPT` transport:
+
+| response | bytes | fits one assertion (≤513)? |
+|---|---|---|
+| RSA-2048 signature | 256 | yes |
+| RSA-3072 signature | 384 | yes |
+| RSA-4096 signature | 512 | yes, but > `MAX_LARGE_RESP_CHUNK` (500) |
+| ML-DSA-65 signature | 3309 | no |
+
+RSA-4096 is the case worth watching: it fits the 513-byte assertion but exceeds
+the 500-byte chunk size, so the chunking splits a response that previously went
+in one piece — into a host that cannot reassemble. Not yet reproduced on
+hardware (no classic RSA-4096 key is provisioned on this device), so this is
+stated as a read of the code, not a measurement.
+
+One more detail from the same reading, worth recording because it makes the
+duplicate-suppression look like it works when it doesn't: the web app sends
+`OKPING` as `ctaphid_via_webauthn(cmd, 2, null, null, ...)`, and
+`encode_ctaphid_request_as_keyhandle()` stores `opt3 & 0xff` — so **every**
+`OKPING` poll arrives with `opt3 == 0`. `send_stored_response()`'s
+`is_duplicate` test is `large_resp_buffer_last_opt3 && opt3 <= last_opt3`,
+which with a constantly-zero `opt3` never fires. Chunk advance happens to work
+on Linux for that reason; the Windows 10 1903 double-fire it was written to
+guard against is not actually covered on this path.
 
 ## Known minor issues (non-blocking)
 
