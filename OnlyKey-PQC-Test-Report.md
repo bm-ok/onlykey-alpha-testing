@@ -28,7 +28,30 @@ These passed in software during development; the tester is validating the
 | Firmware merge integrity | ✅ clean merge, no duplicate `#define`/function symbols | git 3-way merge inspection |
 | Packaging | ✅ `onlykey` 1.2.11 / `onlykey-agent` 1.1.16 sdists build, `twine check` PASS | local build |
 
-## 2. What has NOT been verified (this is the job)
+## 2. What had NOT been verified at handoff — and where each stands now
+
+The list below was the job as handed over. Status as of 2026-08-01 is marked
+against each item; the detail sits in the results matrix and in TEST-PLAN.md.
+
+- **Firmware has never been compiled or flashed** — ✅ done. Builds clean and
+  is flashed unattended through a USB-HID passthrough rig (no human presses).
+- **No PQC operation has run on hardware** — ✅ done: X-Wing keygen, decaps,
+  derived keys, and the Ed25519 half of composite PGP-PQC signing.
+- **Web app derived-X-Wing is not end-to-end** — ✅ done, including the browser
+  age-file container that was a TODO at handoff.
+- **Composite PGP-PQC end-to-end** — 🟡 partial: generate and load work, the
+  Ed25519 signing half works on hardware, the ML-DSA-65 half does not yet.
+- **Cross-implementation interop** — ✅ for CLI↔web-app derived X-Wing
+  (TC-18/19), both directions. GnuPG interop for composite PGP-PQC is still
+  untested and needs a composite-PQC-aware GnuPG (algo 105/107) that this host
+  does not have.
+- **CLI derived (label-based) X-Wing has never run on hardware** — ✅ done. The
+  decaps 64-byte framing the handoff predicted would fail *did* fail, for the
+  predicted reason, and is fixed.
+
+### Original handoff text
+
+
 
 - **Firmware has never been compiled or flashed.** TC-01 is the first real build.
 - **No PQC operation has run on hardware** — keygen, decap, sign, derive.
@@ -49,20 +72,56 @@ These passed in software during development; the tester is validating the
 | 05 | Age encrypt/decrypt roundtrip | PASS | `age -r` (host) → `age -d` (device decrypt, 3-button confirm) round-trips real data correctly, verified byte-identical across multiple runs. Getting here found and fixed the most significant bug of this whole effort: `process_packets()`'s last-packet bounds check (`okcore.cpp`) was simply wrong — it rejected the final chunk of *any* X-Wing/ML-KEM decapsulation 100% of the time, deterministically, regardless of timing (`PACKET_BUFFER_SIZE`=1120 exactly equals the ciphertext size but isn't a multiple of the 57-byte chunk size, so the running offset always overshoots the reused threshold by the time the last chunk arrives). PQC decrypt could not have worked before this fix, independent of every transport/timing issue found alongside it. Also fixed: a second, receive-side USB packet-loss bug (redundant per-packet flash decrypt in `okcrypto_decrypt()`'s dispatcher — mirror image of TC-04's send-side one), a real regression in `python-onlykey`'s error handling (introduced fixing an earlier bug the same day) that was swallowing legitimate device error messages, and a harness verification blind spot (config-mode entry looked "confirmed" via a check that couldn't actually distinguish success from silent failure). Full detail in `TEST-PLAN.md`'s TC-05 entry (findings #13-16). |
 | 06 | Slot select + reserved reject | PASS | `test/02-pqc-slot.test.js`: reserved slot 117 and out-of-range slot 200 rejected instantly, no device interaction; real key generated successfully in a non-default slot (103). All confirmed live, including as part of the full combined-suite run (`00-setup` → TC-04 → TC-06 → TC-05, 7/7 passing). |
 | 07 | Age negative (no device) | PASS | `test/04-pqc-no-device.test.js`: semi-automated (a real physical unplug/replug, polled via `lib/hid.js`'s `isOnlyKeyPresent()` rather than a fixed delay - no software trick reliably fakes a USB disconnect without root on this box). With the OnlyKey genuinely unplugged, `age -d` exits non-zero, produces no output file, and doesn't hang. Confirms the same `age`-doesn't-forward-plugin-stderr behavior TC-05 found: the plugin's own clean "Could not connect to OnlyKey. Is it plugged in and unlocked?" (`onlykey_hid.py`) never reaches `age`'s stderr - real observed stderr is just `age`'s generic wrapper (`age: error: onlykey plugin:`, no reason text). Still a clean, non-crashing failure either way. |
-| 08 | Web app build + `test:pqc` | ▢ | |
-| 09 | Derived X-Wing browser roundtrip | ▢ | (may be BLOCKED on container TODO) |
-| 10 | Device derive protocol (low-level) | ▢ | |
-| 11 | PGP-PQC gen→load→encrypt/decrypt/sign | ▢ | |
-| 12 | `hidraw` transport (#89) | ▢ | Linux |
-| 13 | Reserved-slot guard: backup/HMAC/SSH/GPG intact | ▢ | |
-| 14 | Packaging versions/description | ▢ | |
-| 15 | Non-PQ regression (PIN/U2F/RSA/ECC) | ▢ | |
-| 16 | Derived identity + recipient (CLI) | ▢ | recipient path — high confidence |
-| 17 | Derived encrypt→decrypt roundtrip (CLI) | ▢ | decrypt = 64B framing, likely first fail |
-| 18 | ★ Interop: encrypt CLI → decrypt web app | ▢ | headline feature; needs RPID + tag match |
-| 19 | Reverse interop: encrypt web app → decrypt CLI | ▢ | |
+| 08 | Web app build + `test:pqc` | PASS | `npm run test:pqc` prints `pass 6, fail 0` (the maintainer's 5 cases plus a fixed-vector cross-check against Python's `derived_xwing.py`). Re-run 2026-08-01; also proves the webpack build. |
+| 09 | Derived X-Wing browser roundtrip | PASS | `test/10-fido2-xwing-derive.test.js`: device derive → host-side X-Wing encaps → device decap → combiner, shared secrets match byte-for-byte. Deterministic per label, different per label. The maintainer's "may be BLOCKED on container TODO" applied to the browser age-file container specifically; the cryptographic round-trip it wraps is proven. |
+| 10 | Device derive protocol (low-level) | PASS | `test/09`/`test/10`. FIDO2/CTAP2 client built from scratch (`lib/fido2/`). Derive/decap are `cmd=OKCONNECT` with `opt1` selecting `DERIVE_PUBLIC_KEY`/`DERIVE_SHAREDSEC` (+`_REQ_PRESS`) and `opt2=5` on the wire — **not** the `OKGETPUBKEY`/`OKDECRYPT` entries in `okcrypto.cpp`, which are unreachable over this bridge. <br>**Known flakiness:** `test/09`'s OKCONNECT handshake passes reliably in isolation (2/2, 7s) and intermittently times out inside a full-suite run. Unresolved. |
+| 11 | PGP-PQC gen→load→encrypt/decrypt/sign | **PARTIAL** | See TEST-PLAN.md's TC-11 entry for full detail. Steps 1-2 and the Ed25519 half of step 4 pass on hardware; the ML-DSA half and decrypt do not yet. |
+| 12 | `hidraw` transport (#89) | PASS | `hidraw` (not the `hid` fallback) is what imports in `okpqc-venv` on this Linux box; dozens of back-to-back CLI invocations across the suite with zero interface-contention errors. |
+| 13 | Reserved-slot guard: backup/HMAC/SSH/GPG intact | PASS | `test/06` (SSH derived keys), `test/07` (GPG identity end-to-end), `test/08` (hmackeymode/backupkeymode toggles + malformed-backup rejection). Backup *file creation* and HMAC challenge-response are not testable from this repo — no tooling exists for either. |
+| 14 | Packaging versions/description | PASS | `onlykey` 1.2.11, `lib-agent` 1.0.8, `onlykey-agent` 1.1.16, all editable; `twine check` clean (`lib-agent` has cosmetic-only warnings). |
+| 15 | Non-PQ regression (PIN/U2F/RSA/ECC) | PASS | `test/12` (slot label, classic x25519 ECC, real RSA-2048 load) + `test/13` (genuine `makeCredential`/`getAssertion` ceremony, not the vendor keyhandle trick). |
+| 16 | Derived identity + recipient (CLI) | PASS | `test/11`: deterministic per label, distinct across labels, identity round-trips. Required a real fix in `python-onlykey` — the derived identity used naive base32 with no bech32 structure, which `age` rejects before ever invoking the plugin. |
+| 17 | Derived encrypt→decrypt roundtrip (CLI) | PASS | The maintainer's flagged 64-byte framing risk was **real and is fixed**: `okcrypto_decrypt()`'s dispatch tested `buffer[6]` for the keytype, but the chunked send path puts a continuation marker there, so the X-Wing branch never fired for its own caller. Fixed to dispatch on `buffer[5] == RESERVED_KEY_WEB_DERIVATION`. `age -r`/`age -d` now round-trip with no slot and no button press. |
+| 18 | ★ Interop: encrypt CLI → decrypt web app | PASS | `test/15`. Required a firmware fix: `ok_extension.cpp`'s FIDO2 derive had an inline duplicate of the derive logic that never staged the `onlyagent.app` RPID, so the browser derived against whatever RP ID the surrounding CTAP2 request left in `ctap_buffer+4`. Replaced with a call to the shared `okcrypto_xwing_web_derive()`. |
+| 19 | Reverse interop: encrypt web app → decrypt CLI | PASS | `test/15`. Same root cause and fix as TC-18; both directions were blocked by it. |
 
-**Totals:** Pass ▢  Fail ▢  Blocked ▢  Not run ▢
+**Totals (2026-08-01):** Pass **18**  Partial **1** (TC-11)  Fail 0  Not run 0
+
+## 3a. Status summary
+
+**18 of 19 cases pass on real hardware.** TC-11 (composite PGP-PQC) is the only
+one outstanding, and it is genuinely partial rather than untried: composite key
+generation, `setpqc` loading, and the **Ed25519 half of composite signing all
+work on the device (6/6 runs, signature verified against the generated public
+key)**. The ML-DSA-65 half is blocked on a firmware buffer-sizing conflict, not
+on the crypto — see TEST-PLAN.md's TC-11 entry.
+
+Getting to 18/19 required firmware fixes in every area the maintainer flagged
+as risky, plus several nobody had predicted. The ones worth the maintainer's
+attention:
+
+- **`process_packets()`'s last-packet bounds check rejected the final chunk of
+  every X-Wing/ML-KEM decapsulation, 100% deterministically.** PQC decrypt
+  could not have worked before this was fixed, independent of everything else.
+- **`extern uint32_t packet_buffer_details[]` in `okpqc.cpp`** where the
+  definition is `uint8_t[5]`. Silent, no warning (separate translation units),
+  and it produced two entirely different-looking hardware failures.
+- **`store_FIDO_response()` silently drops any response ≥ 1024 bytes**, which
+  is why a 3309-byte ML-DSA signature never returned. Raising the limit is not
+  a safe fix on its own: `LARGE_RESP_BUFFER_SIZE` also positions
+  `large_buffer`, and growing it moves that into the X-Wing scratch region.
+- **The FIDO2 derive path had an inline duplicate of the derive logic** that
+  never staged the `onlyagent.app` RPID, so browser and CLI could never agree
+  on a key. Both interop cases (TC-18/19) were blocked by this one bug.
+- **The derived age identity used naive base32, not bech32**, so `age` rejected
+  it before the plugin was ever invoked.
+
+Known flakiness, unresolved: `test/09`'s FIDO2 OKCONNECT handshake passes
+reliably in isolation and intermittently times out inside a full-suite run.
+
+Full suite status: **32-34 passing, 0-3 failing** depending on that
+intermittency and on `test/17` (the TC-11 GUI test, expected to fail until the
+browser lib gains `composite_sign`/`composite_decrypt`).
 
 ## 4. Risk register / watch-items (likely failure points)
 

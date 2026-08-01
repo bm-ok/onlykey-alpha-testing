@@ -1,5 +1,5 @@
 const assert = require('assert');
-const { OnlyKeyDevice, checkStatus } = require('../lib/device');
+const { OnlyKeyDevice, checkStatus, waitForDeviceReady } = require('../lib/device');
 const { PINS } = require('../lib/config');
 
 // Setup only makes sense once per device lifetime - a device that's already
@@ -13,6 +13,17 @@ describe('Device initial setup (SETUP-02/03/04)', function () {
 
     before(async function () {
         status = await checkStatus();
+        if (status.state === 'unknown') {
+            // 'unknown' here almost always means "locked", not "unreachable":
+            // a locked device answers `onlykey-cli settime` with an empty read
+            // on most attempts (measured 2026-07-31: 12 of 14 polls over 22s),
+            // and checkStatusOnce() has nothing to classify that as. Settle it
+            // by making the device answer directly - waitForDeviceReady()
+            // throws if it genuinely cannot, which is the case the assertion
+            // below is really there to catch.
+            await waitForDeviceReady();
+            status = { state: 'locked', raw: status.raw };
+        }
     });
 
     it('reports current device state', function () {
