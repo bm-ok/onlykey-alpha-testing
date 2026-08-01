@@ -4,3 +4,4 @@ __pycache__/
 *.pyc
 .derived-key-challenge-mode-cache.json
 .stored-key-challenge-mode-cache.json
+.tc11-blob-cache.hex

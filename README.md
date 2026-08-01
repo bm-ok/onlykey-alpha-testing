@@ -97,6 +97,50 @@ npx mocha --config /tmp/empty.mocharc.json test/01-pqc-keygen.test.js
   A genuinely wedged device and a slow-but-working call look identical from
   the outside otherwise - a hard timeout plus a real response is what tells
   them apart.
+- **The suite behaves like a compiler: it stops at the first error.** The
+  only thing a test may wait out is the device settling. Anything already
+  known to have failed must end the run at the moment it becomes known - not
+  after a poll loop finishes, and never by someone checking on a run in
+  progress. If you find yourself polling a running test to see how it is
+  doing, the test is wrong, not the checking.
+
+  What this rules out, each of which was a real defect here:
+  - Collecting page errors during a 90s DOM poll and asserting on them
+    *afterwards*. Use `lib/gui_wait.js` - `armFailFast()` records the first
+    page exception into `window.__guiFatal`, and `waitInPage()` breaks on it
+    immediately.
+  - An exception inside a promise chain that cannot reject. A throw in
+    `ctaphid_via_webauthn`'s decode step skipped its `resolve()`, so the
+    promise never settled and the caller waited forever with the browser's
+    WebAuthn prompt on screen. Callback and decode paths must always settle.
+  - Running the whole suite to exercise one spec. Use
+    `npm run test:one -- <file>` (a config with no `spec` glob and
+    `bail: true`); a bare `--spec` *merges* with `.mocharc.json`'s glob
+    rather than replacing it, so `npx mocha test/17-...` runs all of them.
+
+  Fail fast on what the *device* says, not on a guess: `"Error incorrect
+  challenge was entered"` is transient - OKPING emits it between the last
+  challenge digit landing and the result being stored - while `"Timeout
+  occured while waiting for confirmation"` is the device abandoning the
+  operation, and is terminal.
+
+- **FIDO2 work is proven in Node first, then confirmed under nwjs.** Paired
+  specs share a number and name the transport:
+
+      test/17-nodejs-composite-pgp.test.js    <- build and debug here
+      test/17-nwjs-composite-pgp.test.js      <- confirm here, after it passes
+
+  Node drives the identical firmware through `lib/fido2/` with no browser, no
+  page handshake and no webpack bundle in the way, so a failure names one
+  variable. The GUI run takes ~55s to say less. Write the Node spec first, get
+  it green, and only then reach for nwjs.
+
+  The pair also cross-checks: a fault visible in **both** is firmware; a fault
+  only nwjs shows is the page. Measured 2026-08-01 - a composite-sign
+  regression read as a "browser transit-key mismatch" through nwjs, and under
+  Node was plainly *both* halves failing, including the 64-byte Ed25519 one.
+  That is far below any response-staging limit, which killed the buffer-size
+  theory the GUI runs had pointed at for an hour.
 
 Full rationale in [TEST-PLAN.md](TEST-PLAN.md).
 

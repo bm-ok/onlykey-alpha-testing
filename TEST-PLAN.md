@@ -351,6 +351,38 @@ which with a constantly-zero `opt3` never fires. Chunk advance happens to work
 on Linux for that reason; the Windows 10 1903 double-fire it was written to
 guard against is not actually covered on this path.
 
+## The 72-byte default response leaks stack memory — found 2026-08-01
+
+Same `sigder_sz = 72` default as above, seen from the other side. It applies to
+**every** extension assertion that isn't serving data, not just oversized ones.
+
+`send_stored_response()` answers a poll made while the device is still waiting
+on the button challenge with `CTAP2_ERR_USER_ACTION_PENDING` and calls no
+`extension_writeback()` at all, so `output_buffer_offset` is 0 and nothing is
+written past the status byte. `ctap.cpp` still CBOR-encodes 72 bytes: the
+status plus **71 bytes of uninitialised stack**.
+
+Measured live: a `composite_decrypt` that nobody confirmed on the device
+resolved "successfully" in 1.4 s carrying 71 bytes, tail
+`4F 43 4B 45 44 76 33 2E 30 2E 34 2D 74 65 73 74` = `OCKEDv3.0.4-test`, the
+remains of an earlier `UNLOCKED` response.
+
+Two consequences:
+
+1. **Host classification by payload shape is unsound.** Both composite poll
+   loops decided "printable ASCII = status string, binary = real output". Stack
+   garbage is not printable, so it was accepted as the decrypted plaintext /
+   signature and handed to openpgp.js. Fixed host-side by keying off
+   `resp.status` and treating only `CTAP1_SUCCESS` as carrying a payload —
+   which is what `onlykey-pgp.js`'s `msg_polling()` has always done for the
+   classic RSA path. Applied to `onlykey-3rd-party.js`'s `poll_for_response`
+   and `lib/fido2/composite.js`'s `pollForResponse`.
+2. **It is a memory disclosure**, small but real: 71 bytes of recent firmware
+   stack to any origin that can reach the extension path. The firmware fix is
+   to send `sigder_sz = 1` (status byte only) when `output_buffer_offset` is 0,
+   rather than padding to 72. Not applied — it needs its own flash cycle and
+   its own regression pass, and the host-side fix already unblocks TC-11.
+
 ## Known minor issues (non-blocking)
 
 - **FIDO2 user-presence LED can stick pulsing blue if the host process dies mid-request.** `ctap_user_presence_test()` (`libraries/fido2/device.cpp`) calls `fadeoff(1)` on its own timeout path, and the analogous PIN-flow timeouts in `okcore.cpp` do the same. `fadeoff(color)`'s cleanup of the recurring `FadeinTask`/`FadeoutTask` pulse timers only happens when `color == 0` - a non-zero color (as passed here) leaves those timers running, relying instead on `Endfade.startDelayed()` firing `fadeendafter2sec()` ~2s later to actually stop them. Observed live (2026-07-24): after force-killing a background test run (`kill -9`) that was mid-`test/09` (FIDO2 OKCONNECT), the device was left with the blue LED pulsing indefinitely, well past that 2s window - though the device stayed fully functional throughout (unrelated PIN setup + X-Wing derive/decaps requests kept succeeding). A normal, non-destructive `restartDevice()` (button-8 long-press, `CPU_RESTART()`, no data loss) cleared it. Root cause of *why* the normal 2s self-clear didn't fire this time isn't confirmed - plausibly the interrupted request left the firmware's request-handling state machine short of whatever step re-arms/clears `Endfade`, but not chased further since it's cosmetic (LED only) and has a known, cheap workaround. Not filed as a TC since it doesn't correspond to any maintainer test case - flagging here for awareness.

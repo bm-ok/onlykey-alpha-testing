@@ -3,9 +3,10 @@ const { execFile } = require('child_process');
 const { isAlive, evalInPage, getConsoleLog } = require('../lib/nwjs_client');
 const { unlockDevice } = require('../lib/device');
 const { SeremuChannel, sleep } = require('../lib/hid');
-const { VENV_BIN } = require('../lib/config');
+const { VENV_BIN, NO_RESPONSE_TIMEOUT_MS } = require('../lib/config');
 const { ensureUnlocked, setStoredKeyChallengeMode } = require('../lib/gui_helpers');
 const { startGuiSession } = require('../lib/gui_session');
+const { armFailFast, waitInPage } = require('../lib/gui_wait');
 const { challengeDigitsForPayload } = require('../lib/composite_pgp_challenge');
 const { runInConfigMode } = require('../lib/config_mode');
 
@@ -94,26 +95,146 @@ function runCli(args, { timeoutMs = 20000 } = {}) {
 // a failure).
 const tc11DebugLog = [];
 
-async function confirmOneChallenge(channel, digits, { primedTimeoutMs = 45000, pressDelayMs = 400, settleMs = 0 } = {}) {
+// A failed device operation must report what the DEVICE said, not just that
+// the host stopped waiting. Without this the whole diagnosis was "did not
+// appear within 90000ms", while the firmware had been printing the reason on
+// the DEBUG channel the entire time.
+//
+// Folds the trace into err.message rather than console.log()ing it, so it
+// survives into mocha's failure output instead of scrolling past above it.
+function attachDeviceTrace(err, channel, label, { lines = 40 } = {}) {
+    if (!channel) return err;
+    let buffer = '';
+    try { buffer = channel.buffer || ''; } catch (e) { return err; } // channel already closed
+    for (const line of buffer.split('\n')) {
+        if (line.includes('TC11DEBUG')) tc11DebugLog.push(line);
+    }
+    // Write the WHOLE trace to a file and name it. A tail is a guess about
+    // which slice of the trace matters, and the guess was wrong: 40 lines of a
+    // decrypt failure covered only the polling loop, while the priming that
+    // caused it had already scrolled off.
+    let dumpPath = null;
+    try {
+        const os = require('os');
+        const fs = require('fs');
+        dumpPath = require('path').join(os.tmpdir(), `tc11-${label}-trace.log`);
+        fs.writeFileSync(dumpPath, buffer);
+    } catch (e) { /* diagnostics must never replace the real error */ }
+
+    const tail = buffer.split('\n').filter((l) => l.trim()).slice(-lines);
+    err.message += `\n\n--- device DEBUG trace during ${label} (last ${tail.length} lines`
+        + (dumpPath ? `; FULL trace: ${dumpPath}` : '') + `) ---\n${tail.join('\n')}`;
+    if (tc11DebugLog.length) {
+        err.message += `\n--- TC11DEBUG ---\n${tc11DebugLog.join('\n')}`;
+    }
+    return err;
+}
+
+// Waits for the device to prime the confirmation challenge, then enters the
+// three digits - each one gated on the device's own acknowledgement of the
+// previous one.
+//
+// NO TIMERS. Every step proceeds on a recognised device response or throws;
+// nothing continues because time passed.
+//
+// This previously did the opposite in the one place it mattered most: if the
+// "Encrypted Buffer" priming signal did not arrive within its budget it
+// logged `primed: false` and **sent the digits anyway**, on the theory that
+// priming was "very likely done by then regardless". That is unrecognised
+// state treated as success - and it is actively unsafe, because a wrong
+// challenge on a device with a self-destruct PIN configured
+// (test/00-setup.test.js) is not a retryable mistake. If the device has not
+// said it is ready, the only correct move is to stop.
+//
+// The fixed 400ms between presses is gone for the same reason. The firmware
+// echoes `I received from DEBUG: <digit>` from its terminator branch exactly
+// once per complete press, and dispatches the press inline in loop() right
+// afterwards - so the echo for press N+1 cannot appear until press N's
+// handler has returned. Waiting on that echo is what the delay was
+// approximating, and unlike the delay it cannot be wrong.
+// Parses the firmware's `Received Message` byteprint out of the DEBUG trace.
+//
+// done_process_packets() prints exactly the bytes the challenge is hashed
+// over - `byteprint(packet_buffer, packet_buffer_offset)` - immediately before
+// computing Challenge_button1/2/3. So the host can check, rather than assume,
+// that the device assembled the same payload the digits were derived from.
+//
+// byteprint() writes uppercase hex WITHOUT zero padding ("F3 0 0 8C"), one
+// space between bytes, wrapped in blank lines.
+function parseReceivedMessage(buffer) {
+    const idx = buffer.lastIndexOf('Received Message');
+    if (idx === -1) return null;
+    const after = buffer.slice(idx + 'Received Message'.length);
+    // Bytes run until the next non-hex label line the firmware prints.
+    const match = after.match(/^[\s]*((?:[0-9A-Fa-f]{1,2}[ \r\n]+)+)/);
+    if (!match) return null;
+    const bytes = match[1].trim().split(/\s+/).filter(Boolean).map((h) => parseInt(h, 16));
+    if (bytes.some((b) => Number.isNaN(b))) return null;
+    return Buffer.from(bytes);
+}
+
+async function confirmOneChallenge(channel, challenge, { primedTimeoutMs = NO_RESPONSE_TIMEOUT_MS, ackTimeoutMs = 8000 } = {}) {
+    const digits = challenge.digits || challenge;
+    const expectedPayload = challenge.payload || null;
     for (const line of channel.buffer.split('\n')) {
         if (line.includes('TC11DEBUG')) tc11DebugLog.push(line);
     }
     channel.clearBuffer();
-    const primed = await channel.waitFor(PRIMED_RE, primedTimeoutMs).then(() => true).catch(() => false);
-    if (settleMs) await sleep(settleMs);
-    console.log('[DEBUG confirm] sending digits', JSON.stringify(digits), 'primed:', primed);
-    for (const digit of digits) {
-        channel.send([digit.charCodeAt(0), SHORT_PRESS]);
-        await sleep(pressDelayMs);
+
+    try {
+        await channel.waitFor(PRIMED_RE, primedTimeoutMs);
+    } catch (e) {
+        throw new Error(
+            `device never primed the challenge (no "Encrypted Buffer" within ${primedTimeoutMs}ms) - ` +
+            'refusing to enter digits blind, since a wrong challenge counts against the self-destruct PIN'
+        );
     }
+
+    // The challenge digits are SHA256 over the bytes the DEVICE accumulated.
+    // If those differ from the bytes we hashed, the digits are wrong before a
+    // single button is pressed - and entering them would spend a
+    // self-destruct-PIN attempt to learn something already visible here.
+    if (expectedPayload) {
+        const received = parseReceivedMessage(channel.buffer);
+        if (!received) {
+            console.log('[DEBUG confirm] no "Received Message" byteprint in trace - cannot verify payload');
+        } else if (!received.equals(expectedPayload)) {
+            throw new Error(
+                `device accumulated a DIFFERENT payload than the digits were computed over:\n` +
+                `  host sent   ${expectedPayload.length} bytes: ${expectedPayload.toString('hex').slice(0, 64)}...\n` +
+                `  device has  ${received.length} bytes: ${received.toString('hex').slice(0, 64)}...\n` +
+                `  first difference at byte ${(() => {
+                    const n = Math.min(received.length, expectedPayload.length);
+                    for (let i = 0; i < n; i++) if (received[i] !== expectedPayload[i]) return i;
+                    return n;
+                })()}`
+            );
+        } else {
+            console.log(`[DEBUG confirm] device payload verified (${received.length} bytes)`);
+        }
+    }
+
+    console.log('[DEBUG confirm] sending digits', JSON.stringify(digits));
+    for (const digit of digits) {
+        const code = digit.charCodeAt(0);
+        const echo = new RegExp(`I received from DEBUG: ${code}(?!\\d)`, 'g');
+        const before = channel.countMatches(echo);
+        channel.send([code, SHORT_PRESS]);
+        try {
+            await channel.waitForCount(echo, before + 1, ackTimeoutMs);
+        } catch (e) {
+            throw new Error(`device never acknowledged challenge digit '${digit}' within ${ackTimeoutMs}ms`);
+        }
+    }
+
     for (const line of channel.buffer.split('\n')) {
         if (line.includes('TC11DEBUG')) tc11DebugLog.push(line);
     }
 }
 
-async function confirmChallenges(channel, digitSets, opts) {
-    for (const digits of digitSets) {
-        await confirmOneChallenge(channel, digits, opts);
+async function confirmChallenges(channel, challenges, opts) {
+    for (const challenge of challenges) {
+        await confirmOneChallenge(channel, challenge, opts);
     }
 }
 
@@ -130,7 +251,12 @@ async function openPgpPqcPage() {
     // about:blank bounce this file used to need before re-opening the page is
     // gone - that was a workaround for getAppPage() only navigating when the
     // target URL differed from the current one.
-    return startGuiSession({ url: PGP_PQC_URL, device: true });
+    const session = await startGuiSession({ url: PGP_PQC_URL, device: true });
+    // Arm the traps before anything can throw. Every wait in this file breaks
+    // on window.__guiFatal, so a page exception ends the test where it happens
+    // instead of being discovered after a 90s DOM poll (lib/gui_wait.js).
+    await armFailFast();
+    return session;
 }
 
 async function clickGenerateAndCollect() {
@@ -203,7 +329,9 @@ async function captureDecryptChallenges(armoredPublicKey, armoredCiphertext, slo
     }
     const digitSets = value.captured.map(challengeDigitsForPayload);
     console.log('[DEBUG digits]', JSON.stringify(digitSets));
-    return digitSets;
+    // Payloads travel with the digits so confirmOneChallenge() can verify the
+    // device accumulated the SAME bytes before entering anything.
+    return value.captured.map((payload, i) => ({ payload: Buffer.from(payload), digits: digitSets[i] }));
 }
 
 // Wires composite hooks with a WRAPPED ok.composite_sign that stashes each
@@ -243,41 +371,60 @@ function kickOffRealSign(plaintext) {
         const armored = await openpgp.sign({ message, signingKeys: window.__tc11HwKey, format: 'armored' });
         document.getElementById('pgp_signature_out').value = armored;
         return armored;
-    `, { timeoutMs: 95000 });
+        // Sign is fire-and-forget: pollPendingDigest() and confirmOneChallenge()
+        // hold the real no-response budget for each half, and both throw the
+        // moment the device goes quiet. This outer cap only has to outlive the
+        // two halves plus their confirmations so their errors surface first.
+    `, { timeoutMs: NO_RESPONSE_TIMEOUT_MS * 6 });
 }
 
 // Polls the page-global setupRealtimeSignCapture's wrapped composite_sign
 // stashes each real digest into, clearing it once read.
-async function pollPendingDigest({ maxMs = 60000, pollMs = 200 } = {}) {
+async function pollPendingDigest({ maxMs = NO_RESPONSE_TIMEOUT_MS, pollMs = 200 } = {}) {
     const deadline = Date.now() + maxMs;
     while (Date.now() < deadline) {
         const { value } = await evalInPage(`
+            if (window.__guiFatal) return { fatal: window.__guiFatal };
             const d = window.__tc11PendingDigest;
             window.__tc11PendingDigest = null;
-            return d;
+            return d ? { digest: d } : null;
         `, { timeoutMs: 5000 });
-        if (value) return value;
+        // A fatal in the page means openpgp.js's sign() has already died -
+        // no later digest is coming, so stop now instead of waiting out maxMs
+        // and then blaming a timeout for someone else's exception.
+        if (value && value.fatal) throw new Error(`composite sign aborted - page fatal: ${value.fatal}`);
+        if (value && value.digest) return value.digest;
         await sleep(pollMs);
     }
     throw new Error(`Timed out after ${maxMs}ms waiting for the next composite_sign digest`);
 }
 
 async function clickDecryptAndCollect(armoredCiphertext) {
-    const { value, errors: pageErrors } = await evalInPage(`
+    // Kick the operation off, then wait via waitInPage() rather than an
+    // in-page deadline loop that reports only at the end. The 90s here is a
+    // backstop for a device still working through the ML-KEM half; a page
+    // fatal or an ERROR status ends the wait at the moment it happens.
+    // Discovering a first-second TypeError 90 seconds later is what this whole
+    // helper exists to stop (see lib/gui_wait.js).
+    await armFailFast();
+    await evalInPage(`
         document.getElementById('pgp_ciphertext_in').value = ${JSON.stringify(armoredCiphertext)};
         document.getElementById('pgp_decrypt').click();
-        const deadline = Date.now() + 90000;
-        let value = '';
-        while (Date.now() < deadline) {
-            value = document.getElementById('pgp_plaintext_out').value;
-            if (value) break;
-            await new Promise((r) => setTimeout(r, 300));
-        }
-        return { value, status: document.getElementById('pgp_decrypt_status').textContent };
-    `, { timeoutMs: 95000 });
-    assert.deepStrictEqual(pageErrors, [], `unexpected page errors during decrypt: ${pageErrors.join('; ')}`);
-    assert.ok(value && !/ERROR/.test(value.status), `decrypt failed: ${value && value.status}`);
-    return value.value;
+        return true;
+    `, { timeoutMs: 15000 });
+
+    return waitInPage(`document.getElementById('pgp_plaintext_out').value`, {
+        // The page's own status line is the progress signal - onlykey-3rd-party
+        // emits "Decrypting - confirm on the device" / "Decryption complete"
+        // through it, so a device working its way through the ML-KEM half keeps
+        // the clock alive while a wedged one does not.
+        progressExpr: `document.getElementById('pgp_decrypt_status').textContent`,
+        failExpr: `(function () {
+            const s = document.getElementById('pgp_decrypt_status').textContent;
+            return /ERROR/.test(s) ? s : '';
+        })()`,
+        label: 'composite decrypt',
+    });
 }
 
 async function clickVerifyAndCollect(armoredSignedMessage) {
@@ -298,7 +445,10 @@ async function clickVerifyAndCollect(armoredSignedMessage) {
 }
 
 describe('GUI: Composite PGP-PQC (browser-driven, real device) (TC-11)', function () {
-    this.timeout(300000);
+    // No multi-minute overrides. Every wait inside this file honours the 30s
+    // no-response rule (lib/config.js NO_RESPONSE_TIMEOUT_MS), so mocha's own
+    // timeout should never be what stops a run - if it ever fires, something
+    // is waiting without a response check and THAT is the bug to fix.
 
     let channel;
 
@@ -306,7 +456,6 @@ describe('GUI: Composite PGP-PQC (browser-driven, real device) (TC-11)', functio
         if (!(await isAlive())) {
             this.skip(); // nwjs not running - see nwjs/readme.md
         }
-        this.timeout(180000);
         await unlockDevice();
         // Force the full 3-digit challenge for stored (RSA-slot) keys -
         // see setStoredKeyChallengeMode's own doc comment in gui_helpers.js.
@@ -323,12 +472,13 @@ describe('GUI: Composite PGP-PQC (browser-driven, real device) (TC-11)', functio
         if (channel) {
             try { channel.close(); } catch (e) { /* already gone */ }
             channel = null;
-            await sleep(500);
+            // No settle sleep here. SeremuChannel.connect() already retries
+            // with a liveness probe, so the next open proves the handle is
+            // usable instead of a fixed delay assuming it.
         }
     });
 
     it('TC-11: generate, load, encrypt, decrypt, sign, and verify a composite PGP-PQC key via the GUI', async function () {
-        this.timeout(550000);
         const slot = 1;
         const plaintext = `TC-11 composite PGP-PQC roundtrip payload ${Date.now()}\n`;
         await openPgpPqcPage();
@@ -379,12 +529,7 @@ describe('GUI: Composite PGP-PQC (browser-driven, real device) (TC-11)', functio
                 confirmChallenges(channel, decryptDigitSets),
             ]);
         } catch (e) {
-            for (const line of channel.buffer.split('\n')) {
-                if (line.includes('TC11DEBUG')) tc11DebugLog.push(line);
-            }
-            console.log('[TC11DEBUG lines from this attempt]');
-            for (const l of tc11DebugLog) console.log(l);
-            throw e;
+            throw attachDeviceTrace(e, channel, 'decrypt');
         }
         channel.close();
         channel = null;
@@ -400,7 +545,10 @@ describe('GUI: Composite PGP-PQC (browser-driven, real device) (TC-11)', functio
         // on why prediction can't work for v6 signatures).
         for (let i = 0; i < 2; i++) {
             const payload = await pollPendingDigest();
-            await confirmOneChallenge(channel, challengeDigitsForPayload(payload));
+            await confirmOneChallenge(channel, {
+                payload: Buffer.from(payload),
+                digits: challengeDigitsForPayload(payload),
+            });
         }
         let armoredSignedMessage;
         try {
@@ -409,12 +557,7 @@ describe('GUI: Composite PGP-PQC (browser-driven, real device) (TC-11)', functio
             assert.ok(value && /^-----BEGIN PGP SIGNED MESSAGE-----/.test(value), `expected an armored cleartext-signed message, got: ${JSON.stringify(value)}`);
             armoredSignedMessage = value;
         } catch (e) {
-            for (const line of channel.buffer.split('\n')) {
-                if (line.includes('TC11DEBUG')) tc11DebugLog.push(line);
-            }
-            console.log('[TC11DEBUG lines from this attempt]');
-            for (const l of tc11DebugLog) console.log(l);
-            throw e;
+            throw attachDeviceTrace(e, channel, 'sign');
         }
         channel.close();
         channel = null;

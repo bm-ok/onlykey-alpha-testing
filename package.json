@@ -5,7 +5,8 @@
   "description": "Automated Mocha test suite for OnlyKey firmware + CLI + web app, driving the physical device over the DEBUG-serial button-injection channel.",
   "type": "commonjs",
   "scripts": {
-    "test": "mocha"
+    "test": "mocha",
+    "test:one": "mocha --config .mocharc.one.json"
   },
   "dependencies": {
     "node-hid": "^3.4.0",
