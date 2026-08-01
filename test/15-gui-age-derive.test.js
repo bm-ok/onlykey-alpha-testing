@@ -6,7 +6,8 @@ const { execFile } = require('child_process');
 const { isAlive, evalInPage, getConsoleLog } = require('../lib/nwjs_client');
 const { unlockDevice } = require('../lib/device');
 const { VENV_BIN } = require('../lib/config');
-const { showStatus, waitForOkConnectSettled, ensureUnlocked, setDerivedKeyChallengeMode } = require('../lib/gui_helpers');
+const { showStatus, ensureUnlocked, setDerivedKeyChallengeMode } = require('../lib/gui_helpers');
+const { startGuiSession } = require('../lib/gui_session');
 
 // Maintainer's TC-18/TC-19: the last two rows of TEST-PLAN.md, and the
 // reason the age-derive page (src/plugins/age-derive/) exists at all -
@@ -64,14 +65,15 @@ async function derivedRecipient(label) {
 // established (clicking while OKCONNECT is still in flight collides with
 // it, "A request is already pending").
 async function openAgeDerivePage(label) {
-    await ensureUnlocked();
-    await evalInPage('return true;', { url: AGE_DERIVE_URL });
-    const settledClass = await waitForOkConnectSettled();
-    if (!/text-success/.test(settledClass)) {
-        throw new Error(`OKCONNECT handshake settled as failed (${settledClass}) before any operation was attempted`);
-    }
-    await getConsoleLog({ clear: true });
+    // startGuiSession() (lib/gui_session.js) is the standard open -> settle ->
+    // test -> close flow shared by every GUI test. It replaces what this
+    // function used to do by hand - ensureUnlocked(), navigate, wait for
+    // OKCONNECT, assert text-success, clear the console - and additionally
+    // gates on the device's own DEBUG trace reaching "Transit AES Key", so the
+    // handshake is observed complete rather than inferred from the DOM alone.
+    const session = await startGuiSession({ url: AGE_DERIVE_URL, device: true });
     await evalInPage(`document.getElementById('label').value = ${JSON.stringify(label)}; return true;`);
+    return session;
 }
 
 // Clicks Encrypt and polls #age_file_out/#identity_out until both are
@@ -153,10 +155,13 @@ describe('GUI: Derived X-Wing age encryption (browser-driven, real device) (TC-1
         const label = `tc19-${Date.now()}`;
         const plaintext = `TC-19 browser-encrypt roundtrip payload ${Date.now()}\n`;
 
-        await openAgeDerivePage(label);
+        const session = await openAgeDerivePage(label);
         await evalInPage(`document.getElementById('plaintext').value = ${JSON.stringify(plaintext)}; return true;`);
 
         const { fileB64, identity, ctapErrors, pageErrors } = await clickEncryptAndCollect();
+        // Step 4: the window is destroyed once the page has given up its
+        // results. Everything below is CLI-side and needs no browser.
+        await session.close();
         assert.deepStrictEqual(pageErrors, [], `unexpected page errors: ${pageErrors.join('; ')}`);
         assert.deepStrictEqual(ctapErrors, [], `unexpected CTAP2 errors: ${JSON.stringify(ctapErrors)}`);
         assert.ok(fileB64 && !fileB64.startsWith('ERROR'), `expected a base64 age file, got: ${JSON.stringify(fileB64)}`);
@@ -194,9 +199,10 @@ describe('GUI: Derived X-Wing age encryption (browser-driven, real device) (TC-1
 
         const fileB64 = fs.readFileSync(ageFilePath).toString('base64');
 
-        await openAgeDerivePage(label);
+        const session = await openAgeDerivePage(label);
 
         const { decrypted, ctapErrors, pageErrors } = await clickDecryptAndCollect(fileB64);
+        await session.close();
         assert.deepStrictEqual(pageErrors, [], `unexpected page errors: ${pageErrors.join('; ')}`);
         assert.deepStrictEqual(ctapErrors, [], `unexpected CTAP2 errors: ${JSON.stringify(ctapErrors)}`);
         assert.strictEqual(decrypted, plaintext, 'browser-decrypted content does not match the CLI-encrypted plaintext');

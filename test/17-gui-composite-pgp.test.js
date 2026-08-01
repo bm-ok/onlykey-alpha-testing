@@ -4,7 +4,8 @@ const { isAlive, evalInPage, getConsoleLog } = require('../lib/nwjs_client');
 const { unlockDevice } = require('../lib/device');
 const { SeremuChannel, sleep } = require('../lib/hid');
 const { VENV_BIN } = require('../lib/config');
-const { ensureUnlocked, setStoredKeyChallengeMode, waitForOkConnectSettled } = require('../lib/gui_helpers');
+const { ensureUnlocked, setStoredKeyChallengeMode } = require('../lib/gui_helpers');
+const { startGuiSession } = require('../lib/gui_session');
 const { challengeDigitsForPayload } = require('../lib/composite_pgp_challenge');
 const { runInConfigMode } = require('../lib/config_mode');
 
@@ -117,19 +118,19 @@ async function confirmChallenges(channel, digitSets, opts) {
 }
 
 async function openPgpPqcPage() {
-    await ensureUnlocked();
-    await evalInPage('return true;', { url: PGP_PQC_URL });
-    // Same pre-click sequencing test/15's openAgeDerivePage() established -
-    // onlykeyApi.sharedsec (needed by sendCompositePayload's aesgcm_encrypt)
-    // is only set once the page's own OKCONNECT handshake resolves
-    // (onlykey-api.js's OK_CONNECT()). Missing this wait here is what made
-    // the real decrypt/sign calls fail with "undefined is not iterable"
-    // deep inside aesgcm_encrypt - sharedsec was still undefined.
-    const settledClass = await waitForOkConnectSettled();
-    if (!/text-success/.test(settledClass)) {
-        throw new Error(`OKCONNECT handshake settled as failed (${settledClass}) before any operation was attempted`);
-    }
-    await getConsoleLog({ clear: true });
+    // startGuiSession() (lib/gui_session.js) is the standard open -> settle ->
+    // test -> close flow shared by every GUI test, and the settle is exactly
+    // what this page needs: onlykeyApi.sharedsec (used by
+    // sendCompositePayload's aesgcm_encrypt) only exists once the page's
+    // OKCONNECT handshake resolves (onlykey-api.js's OK_CONNECT()). Acting
+    // before that is what made the real decrypt/sign calls fail with
+    // "undefined is not iterable" deep inside aesgcm_encrypt.
+    //
+    // It also opens a genuinely fresh window every time, which is why the
+    // about:blank bounce this file used to need before re-opening the page is
+    // gone - that was a workaround for getAppPage() only navigating when the
+    // target URL differed from the current one.
+    return startGuiSession({ url: PGP_PQC_URL, device: true });
 }
 
 async function clickGenerateAndCollect() {
@@ -362,10 +363,9 @@ describe('GUI: Composite PGP-PQC (browser-driven, real device) (TC-11)', functio
         // (forcing a new OKCONNECT against the now-stable, post-restart
         // device) and re-populate the DOM's public key field from the
         // Node-side value already captured above, since a real navigation
-        // clears it. getAppPage() only navigates when the target URL
-        // differs from the current one, and we're already on PGP_PQC_URL -
-        // so bounce through about:blank first to force a genuine reload.
-        await evalInPage('return true;', { url: 'about:blank' });
+        // clears it. startGuiSession() opens a genuinely fresh window every
+        // call, so re-opening the same URL really is a new realm - no
+        // about:blank bounce needed to force it.
         await openPgpPqcPage();
         await evalInPage(`document.getElementById('pgp_public_key').value = ${JSON.stringify(armoredPublicKey)}; return true;`);
         const armoredCiphertext = await clickEncryptAndCollect(slot, plaintext);

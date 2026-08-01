@@ -29,6 +29,21 @@ const { spawn } = require('child_process');
 
 const WEBAPP_DIR = path.join(__dirname, '..', '..', 'onlykey.github.io');
 
+// A landing page that makes no device call - see the auto-open below for why
+// that matters. Says what it is, so a human who finds this window knows it is
+// the harness and where to go next.
+const START_URL =
+    'data:text/html,' +
+    encodeURIComponent(
+        '<body style="background:#111;color:#0f0;font:16px monospace;padding:2em">' +
+            '<h2>onlykey-testing: nwjs ready</h2>' +
+            '<p>Web app is served at <a style="color:#6cf" href="http://localhost:3000/">http://localhost:3000/</a>.</p>' +
+            '<p>This landing page makes no device call on purpose. Opening an app page before the ' +
+            'OnlyKey is unlocked makes its startup OKCONNECT time out, which raises a native ' +
+            'WebAuthn dialog that no test can dismiss.</p>' +
+            '<p>Tests open their own window (lib/gui_session.js).</p></body>'
+    );
+
 const server = spawn(process.execPath, ['index.js'], {
     cwd: WEBAPP_DIR,
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -39,7 +54,20 @@ server.stdout.on('data', (d) => {
     console.log('[webapp]', text);
     if (!serverReady && /listening on/i.test(text)) {
         serverReady = true;
-        openAppWindow().catch((e) => console.error('failed to auto-open app window:', e.message));
+        // Deliberately NOT an app url. Loading any app page runs
+        // src/plugins/index/index.js's doSetTime() -> OKCONNECT over FIDO2,
+        // and at this point in startup nothing has unlocked the device yet -
+        // so the request times out and Chromium raises a native
+        // "Something went wrong / The request timed out" dialog. That dialog
+        // is browser chrome: invisible to CDP, un-clickable from any test, and
+        // it blocks the window's device calls until a human presses Close.
+        // Confirmed live 2026-08-01 - the auto-open here was poisoning the
+        // window before a single test ran.
+        //
+        // A window still opens automatically for manual use; it just starts
+        // somewhere that makes no device call. Tests do not depend on this
+        // one at all - lib/gui_session.js opens its own fresh window per test.
+        openAppWindow(START_URL).catch((e) => console.error('failed to auto-open app window:', e.message));
     }
 });
 server.stderr.on('data', (d) => console.error('[webapp]', d.toString().trimEnd()));

@@ -2,7 +2,8 @@ const assert = require('assert');
 const { isAlive, evalInPage, getConsoleLog } = require('../lib/nwjs_client');
 const { unlockDevice } = require('../lib/device');
 const { sleep } = require('../lib/hid');
-const { showStatus, waitForOkConnectSettled, ensureUnlocked, setDerivedKeyChallengeMode } = require('../lib/gui_helpers');
+const { showStatus, ensureUnlocked, setDerivedKeyChallengeMode } = require('../lib/gui_helpers');
+const { startGuiSession } = require('../lib/gui_session');
 
 // First real browser-driven ("GUI") test in this suite - clicks through the
 // actual onlykey.github.io web app UI in a real browser (see
@@ -30,38 +31,34 @@ const PASSWORD_GEN_URL = 'http://localhost:3000/app/password-generator';
 // test) via lib/gui_helpers.js - see that file's doc comment for why this
 // setting/cache exists.
 
-// Navigates to the page fresh (own OKCONNECT handshake, own console
+// Opens a fresh window on the page (own OKCONNECT handshake, own console
 // capture buffer - see inject_console_capture.js), clicks Generate, waits
 // for a response, and returns { password, ctapErrors, pageErrors }.
 //
-// ensureUnlocked()/waitForOkConnectSettled() are shared with test/15 (and
-// any later GUI test) via lib/gui_helpers.js - see that file's doc comments
-// for the "locked device hangs WebAuthn" and "A request is already pending"
-// findings that motivated them.
+// The click has to happen after the page's startup handshake, not during it -
+// clicking into an in-flight OKCONNECT collides with it ("A request is already
+// pending", seen live in the console log). That ordering is now
+// startGuiSession()'s job for every GUI test rather than this file's.
 //
-// Considered also waiting for a *second* app-triggered connect
-// (src/plugins/index/index.js's doSetTime(2000) -> onlykeyApi.api.check(),
-// which re-runs the whole OK_CONNECT() handshake ~2000ms after page start)
-// before clicking, on the theory that clicking while it's still in flight
-// risks the same 'A request is already pending' collision seen live in the
-// console log. Disproved live: watched the console log for 12+s after the
-// first connect settled and no second "OKCONNECT STATUS" ever appeared on
-// this page/route - so gating on it would just make every run wait for a
-// timeout that never resolves. Manually walking through navigate -> wait
-// for #header_messages .text-success -> click (this function's actual
-// sequence) succeeded cleanly on the first try with a real ~20-30s gap
-// between settle and click (the natural time several separate diagnostic
-// round-trips took) - a fixed post-settle margin here approximates that
-// same gap without needing the diagnostic calls that produced it.
+// Historical note kept because it rules something out: waiting for a *second*
+// app-triggered connect was considered and disproved live - after the first
+// connect settled, no further "OKCONNECT STATUS" ever appeared on this route
+// across 12+s of watching, so gating on one would wait for a signal that never
+// comes.
 async function clickGenerateAndCollect() {
-    await ensureUnlocked();
-    await evalInPage('return true;', { url: PASSWORD_GEN_URL });
-    const settledClass = await waitForOkConnectSettled();
-    if (!/text-success/.test(settledClass)) {
-        throw new Error(`OKCONNECT handshake settled as failed (${settledClass}) before Generate was ever clicked`);
-    }
-    await sleep(3000);
-    await getConsoleLog({ clear: true });
+    // startGuiSession() (lib/gui_session.js) is the standard open -> settle ->
+    // test -> close flow, and it subsumes what used to be four separate steps
+    // here: ensureUnlocked(), the navigate, the OKCONNECT settle plus its
+    // text-success assertion, and the console clear.
+    //
+    // It also replaces this function's `await sleep(3000)`. That was a margin
+    // for "clicking too soon after the handshake collides with it", inferred
+    // from a manual walkthrough that happened to leave a ~20-30s gap. The
+    // session now waits for the device's own DEBUG trace to reach
+    // "Transit AES Key" - i.e. the handshake is observed complete rather than
+    // assumed complete after a delay - so there is nothing left for the sleep
+    // to cover.
+    const session = await startGuiSession({ url: PASSWORD_GEN_URL, device: true });
 
     // Polls #phrase_out rather than a fixed sleep - a real device round
     // trip here is two sequential derive calls (derive_public_key then
@@ -85,7 +82,23 @@ async function clickGenerateAndCollect() {
 
     const log = await getConsoleLog();
     const ctapErrors = log.filter((e) => /CTAP2_ERR/i.test(e.text)).map((e) => e.text);
-    return { password, ctapErrors, pageErrors };
+    // Step 4: destroy the window. Read the console log first - close()
+    // recycles the window, and the log lives in that window's realm.
+    await session.close();
+    // "Unknown Key Type to Encode" is an ambient kbpgp error this app emits on
+    // its own (already recorded in QUIRKS.md, where it once made
+    // getConsoleLog() itself throw). It shows up on the BLOCKED path - when
+    // the derive is refused, the page falls through to an encode it cannot
+    // complete - so asserting `pageErrors === []` before the blocked branch is
+    // even reached turns the expected-and-tested "blocked by default" case
+    // into a failure. Confirmed live: with the derive actually permitted, the
+    // same page returns a real password with pageErrors === []. Filtered here
+    // rather than at the call site so both attempts get the same treatment.
+    return {
+        password,
+        ctapErrors,
+        pageErrors: (pageErrors || []).filter((e) => !/Unknown Key Type to Encode/.test(e)),
+    };
 }
 
 describe('GUI: Password Generator (browser-driven, real device)', function () {
