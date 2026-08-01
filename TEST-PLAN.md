@@ -194,6 +194,55 @@ before/after comparison possible.
 | TC-18 | ★ Interop: encrypt CLI → decrypt web app | ✅ confirmed live (2026-07-27) | Headline feature - built the browser-facing derive UI this was blocked on. New `src/plugins/age-derive/` page (`onlykey.github.io`, mirrors `password-generator`'s structure), backed by a from-scratch port of the crypto: `src/onlykey-fido2/onlykey/age_pqc.js` (X-Wing/ML-KEM math + the *real* bech32 identity scheme, replacing a stale/broken naive-base32 one) and `age_file.js` (HPKE seal/open + the age v1 STREAM file format, scoped to just the `mlkem768x25519` stanza). Since this app deliberately doesn't pull npm runtime crypto dependencies, `@noble/{hashes,post-quantum,ciphers,curves}` are vendored unmodified into `vendor/@noble/` (see that dir's `VENDORED.md`) and wired through webpack's own bundler via a `resolve.alias` + a babel-loader rule scoped to just that folder (webpack 4's parser can't handle the packages' modern syntax otherwise); `@noble/curves` turned out to be needed too, not for this app's own X25519 use (covered by the already-vendored `nacl.js`), but because `@noble/post-quantum`'s `_crystals.js` has its own internal transitive import on `@noble/curves/abstract/fft.js` (NTT math, unrelated to elliptic curves) - found by an actual webpack build failure, not assumed. `age_pqc.js`/`age_file.js` were verified independently before ever touching hardware: the bech32 identity codec byte-for-byte against the real Python `derived_xwing.py`, the HPKE seal/open math byte-for-byte against `xwing.py` with a fixed test vector, and a JS-generated age file fed to the real `age` binary (correctly parsed the header and dispatched to `age-plugin-onlykey`, failing only because that specific check used a simulated, not-actually-enrolled device key). <br>Wired the device side by adding `KEYTYPE.XWING = 5` and `derive_xwing_recipient()`/`derive_xwing_decap()` to `onlykey-3rd-party.js` (the same package `derive_public_key()`/`derive_shared_secret()` live in), confirming the wire-value offset (`opt2++` in `ok_extension.cpp`) against `okcore.h`'s real `KEYTYPE_XWING=6` enum rather than assuming it. <br>**Found and fixed a real firmware bug via this test's first real-hardware run** (both TC-18 and TC-19 initially failed with a "shared secret mismatch"/`age -d`'s generic "no identity matched any of the recipients", never a crash): `ok_extension.cpp`'s FIDO2 dispatch for `KEYTYPE_XWING` had its own **inline duplicate** of the derive logic instead of calling the already-proven `okcrypto_xwing_web_derive()` the raw-HID path uses (`okcrypto.cpp`, proven correct by TC-16/TC-17) - and that duplicate never staged the `"onlyagent.app"` RPID string into `ctap_buffer+4` before deriving, unlike the shared function, which does. `okcrypto_hkdf()` folds *whatever* RPID string happens to be sitting in `ctap_buffer+4` into the derivation, so the FIDO2 path was deriving against the real WebAuthn RP ID left over from the surrounding CTAP2 request instead of the fixed `"onlyagent.app"` origin the CLI always uses - guaranteeing the browser and CLI could never agree on a key for the same label, no matter how correct the surrounding math was. Root-caused by direct comparison of the two implementations (not guessed), fixed by replacing the inline copy with a direct call to `okcrypto_xwing_web_derive()` (removing the duplicate-implementation drift risk entirely, and incidentally making X-Wing's REQ_PRESS/non-REQ_PRESS behavior match the CLI's, which never had that distinction either). Rebuilt via `make docker-build`, reflashed. <br>**Also found live**: reflashing resets the device to full factory defaults (no PIN, `derived_key_challenge_mode` back off) - required a full `test/00-setup.test.js` re-run, and a stale `.derived-key-challenge-mode-cache.json` (written before the reflash) briefly caused a false-negative by skipping re-enabling that setting on the now-reset device. Both are now called out in `README.md`. <br>New `test/15-gui-age-derive.test.js` (same nwjs/CDP harness as `test/14`, shared `lib/gui_helpers.js` extracted from it - `showStatus`/`waitForOkConnectSettled`/`ensureUnlocked`/`setDerivedKeyChallengeMode`, avoiding a second copy of that logic) - CLI (`age-plugin-onlykey --derived --recipient` + `age -r`) encrypts, the browser page (`derive_xwing_recipient()` + `derive_xwing_decap()` + `splitDecapsulate()`) decrypts: passes clean on a sequential re-run, 1/1. |
 | TC-19 | Reverse interop: encrypt web app → decrypt CLI | ✅ confirmed live (2026-07-27) | Reverse direction of TC-18, same session/fix/page - the browser page (`xwingEncapsHost()` + `encryptAgeFile()`) encrypts, the real `age -d -i <derived identity>` CLI decrypts. Hit and fixed the exact same firmware RPID-staging bug TC-18 did (both directions were blocked by the same root cause, discovered via this test's failure first since it ran first in the suite). `test/15-gui-age-derive.test.js`'s `TC-19` case: passes clean on a sequential re-run, 1/1. |
 
+## Security findings
+
+**The web app's derived-key inputs are coerced to zero bytes, so only their
+LENGTH varies the result.** Found 2026-08-01. `onlykey-3rd-party.js`'s
+`derive_public_key()`/`derive_shared_secret()` hash their input with:
+
+```js
+dataHash = await digestArray(Uint8Array.from(additional_d));
+```
+
+`Uint8Array.from()` on a **string** coerces each character through `Number()`,
+which yields `NaN` for any non-numeric character, stored as `0`. So
+`Uint8Array.from("spike-label")` is eleven zero bytes, and so is
+`Uint8Array.from("other-label")` — identical input to the hash.
+
+`password-generator.js` passes `$("#phrase").val()` straight in, as does
+`vault.js`. **Two different passphrases of the same character length therefore
+derive the same key.** The passphrase contributes only its length.
+
+Confirmed at three levels, not inferred:
+
+1. Library level, via the Node shim (`lib/fido2/browser_env.js`) calling the
+   real `onlykey-3rd-party.js` against the device — two 11-character labels
+   returned the same derived public key.
+2. Language level — `Uint8Array.from("spike-label")` and
+   `Uint8Array.from("other-label")` are both `0,0,0,0,0,0,0,0,0,0,0`.
+3. **End-to-end in the real browser**, driving the actual password-generator
+   page through Chromium's own WebAuthn against the device:
+
+```
+"spike-label"  (11 chars) -> Sm6Z_QP9MRJ0-gQGIP42Q00EbwKbWWnQhkiY23qO-CU
+"other-label"  (11 chars) -> Sm6Z_QP9MRJ0-gQGIP42Q00EbwKbWWnQhkiY23qO-CU
+23-char control           -> 6OqIFClVZL5-_0mIzwScpPxmFgj6VSuoNcUCtHMuJlQ
+```
+
+This is in the **deployed bundle**, not only the `src/` copy — the built
+`docs/app/bundle.*.js` carries the newer 4-argument
+`derive_public_key(additional_d, keytype, press_required, cb)` and still does
+`digestArray(Uint8Array.from(additional_d))`.
+
+The newer age-derive path is **not** affected: it hashes `digestArray(labelBytes)`
+with properly encoded bytes. The fix is the same treatment for these callers —
+encode with `TextEncoder` before hashing — but note that changing the encoding
+**changes every previously derived key**, so it is a migration, not a patch.
+
+`test/14-gui-password-generator.test.js` cannot catch this: it asserts only
+that a password came back without page errors, never that different inputs
+produce different outputs.
+
 ## Known minor issues (non-blocking)
 
 - **FIDO2 user-presence LED can stick pulsing blue if the host process dies mid-request.** `ctap_user_presence_test()` (`libraries/fido2/device.cpp`) calls `fadeoff(1)` on its own timeout path, and the analogous PIN-flow timeouts in `okcore.cpp` do the same. `fadeoff(color)`'s cleanup of the recurring `FadeinTask`/`FadeoutTask` pulse timers only happens when `color == 0` - a non-zero color (as passed here) leaves those timers running, relying instead on `Endfade.startDelayed()` firing `fadeendafter2sec()` ~2s later to actually stop them. Observed live (2026-07-24): after force-killing a background test run (`kill -9`) that was mid-`test/09` (FIDO2 OKCONNECT), the device was left with the blue LED pulsing indefinitely, well past that 2s window - though the device stayed fully functional throughout (unrelated PIN setup + X-Wing derive/decaps requests kept succeeding). A normal, non-destructive `restartDevice()` (button-8 long-press, `CPU_RESTART()`, no data loss) cleared it. Root cause of *why* the normal 2s self-clear didn't fire this time isn't confirmed - plausibly the interrupted request left the firmware's request-handling state machine short of whatever step re-arms/clears `Endfade`, but not chased further since it's cosmetic (LED only) and has a known, cheap workaround. Not filed as a TC since it doesn't correspond to any maintainer test case - flagging here for awareness.
