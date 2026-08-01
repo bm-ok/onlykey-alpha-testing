@@ -3,3 +3,4 @@ node_modules/
 __pycache__/
 *.pyc
 .derived-key-challenge-mode-cache.json
+.stored-key-challenge-mode-cache.json
