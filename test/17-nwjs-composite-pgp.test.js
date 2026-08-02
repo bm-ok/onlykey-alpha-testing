@@ -526,7 +526,17 @@ describe('GUI: Composite PGP-PQC (browser-driven, real device) (TC-11)', functio
     });
 
     it('TC-11: generate, load, encrypt, decrypt, sign, and verify a composite PGP-PQC key via the GUI', async function () {
-        const slot = 1;
+        // RSA2, not RSA1. This spec generates a FRESH composite key every run
+        // and loads it here, while test/17-nodejs keeps a cached blob in RSA1
+        // and checks the device's answers against it. Sharing a slot meant a
+        // GUI run silently replaced the key the Node spec was about to be
+        // measured against - and because that key is perfectly valid, nothing
+        // errored: the Node spec simply failed all seven cases with every
+        // device value "differing from the host", which reads like a firmware
+        // regression. Measured 2026-08-01, one full-suite run after the GUI
+        // case stopped skipping. Same lesson as test/12 and RSA4: a fixture
+        // another spec depends on needs a slot of its own.
+        const slot = 2;
         const plaintext = `TC-11 composite PGP-PQC roundtrip payload ${Date.now()}\n`;
         await openPgpPqcPage();
         const { pub: armoredPublicKey, blobHex } = await clickGenerateAndCollect();

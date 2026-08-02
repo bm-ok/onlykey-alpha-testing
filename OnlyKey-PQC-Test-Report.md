@@ -40,10 +40,10 @@ against each item; the detail sits in the results matrix and in TEST-PLAN.md.
   (ML-DSA-65 signatures and ML-KEM-768 decapsulation, on-device).
 - **Web app derived-X-Wing is not end-to-end** — ✅ done, including the browser
   age-file container that was a TODO at handoff.
-- **Composite PGP-PQC end-to-end** — 🟡 partial: generate, load, sign (both
-  halves) and decrypt (both halves) all work on hardware. What is left is the
-  openpgp.js round trip through `registerCompositeHooks()` and the browser
-  path; the four device operations those depend on are proven.
+- **Composite PGP-PQC end-to-end** — ✅ done, in the browser as the case
+  specifies: generate → load → encrypt → device decrypt → device sign → verify,
+  ending in `Signature VALID`. GnuPG interop remains untested and needs a
+  composite-PQC-aware GnuPG (algo 105/107) this host does not have.
 - **Cross-implementation interop** — ✅ for CLI↔web-app derived X-Wing
   (TC-18/19), both directions. GnuPG interop for composite PGP-PQC is still
   untested and needs a composite-PQC-aware GnuPG (algo 105/107) that this host
@@ -78,7 +78,7 @@ against each item; the detail sits in the results matrix and in TEST-PLAN.md.
 | 08 | Web app build + `test:pqc` | PASS | `npm run test:pqc` prints `pass 6, fail 0` (the maintainer's 5 cases plus a fixed-vector cross-check against Python's `derived_xwing.py`). Re-run 2026-08-01; also proves the webpack build. |
 | 09 | Derived X-Wing browser roundtrip | PASS | `test/10-fido2-xwing-derive.test.js`: device derive → host-side X-Wing encaps → device decap → combiner, shared secrets match byte-for-byte. Deterministic per label, different per label. The maintainer's "may be BLOCKED on container TODO" applied to the browser age-file container specifically; the cryptographic round-trip it wraps is proven. |
 | 10 | Device derive protocol (low-level) | PASS | `test/09`/`test/10`. FIDO2/CTAP2 client built from scratch (`lib/fido2/`). Derive/decap are `cmd=OKCONNECT` with `opt1` selecting `DERIVE_PUBLIC_KEY`/`DERIVE_SHAREDSEC` (+`_REQ_PRESS`) and `opt2=5` on the wire — **not** the `OKGETPUBKEY`/`OKDECRYPT` entries in `okcrypto.cpp`, which are unreachable over this bridge. <br>**Known flakiness:** `test/09`'s OKCONNECT handshake passes reliably in isolation (2/2, 7s) and intermittently times out inside a full-suite run. Unresolved. |
-| 11 | PGP-PQC gen→load→encrypt/decrypt/sign | **PARTIAL** | See TEST-PLAN.md's TC-11 entry for full detail. Steps 1-2 pass, and **steps 3 and 4 both now pass on hardware, all four halves** (`test/17-nodejs-composite-pgp.test.js` 8/8). Sign: Ed25519 (64 B) and ML-DSA-65 (3309 B, retrieved in 7 chunks of 512), each verified against the public key derived from the same seed. Decrypt: X25519 (32 B in) and ML-KEM-768 (1088 B ciphertext in, sent as 5 keyhandles, decapsulated on-device), both shared secrets matching the host byte-for-byte. What remains is the openpgp.js round trip through `registerCompositeHooks()` and the browser path (`test/17-nwjs-...`) — so the case stays PARTIAL. |
+| 11 | PGP-PQC gen→load→encrypt/decrypt/sign | **PASS** | All four steps, **in the web app as the case specifies**. `test/17-nwjs-composite-pgp.test.js` runs generate → `onlykey-cli setpqc RSA1` load → encrypt → device decrypt → device sign → verify through the real browser app in 62.9s, ending in `Signature VALID`; the four device confirmations (X25519, ML-KEM-768, and both signature halves) are all answered over the FIDO2 bridge. `test/17-nodejs-composite-pgp.test.js` (8/8) proves each device primitive separately against an independently computed value, which is what makes a GUI pass meaningful rather than merely green: ML-DSA-65 signatures verify, and both decrypt shared secrets match byte-for-byte. See TEST-PLAN.md's TC-11 entry for the defects found on the way. |
 | 12 | `hidraw` transport (#89) | PASS | `hidraw` (not the `hid` fallback) is what imports in `okpqc-venv` on this Linux box; dozens of back-to-back CLI invocations across the suite with zero interface-contention errors. |
 | 13 | Reserved-slot guard: backup/HMAC/SSH/GPG intact | PASS | `test/06` (SSH derived keys), `test/07` (GPG identity end-to-end), `test/08` (hmackeymode/backupkeymode toggles + malformed-backup rejection). Backup *file creation* and HMAC challenge-response are not testable from this repo — no tooling exists for either. |
 | 14 | Packaging versions/description | PASS | `onlykey` 1.2.11, `lib-agent` 1.0.8, `onlykey-agent` 1.1.16, all editable; `twine check` clean (`lib-agent` has cosmetic-only warnings). |
@@ -88,16 +88,20 @@ against each item; the detail sits in the results matrix and in TEST-PLAN.md.
 | 18 | ★ Interop: encrypt CLI → decrypt web app | PASS | `test/15`. Required a firmware fix: `ok_extension.cpp`'s FIDO2 derive had an inline duplicate of the derive logic that never staged the `onlyagent.app` RPID, so the browser derived against whatever RP ID the surrounding CTAP2 request left in `ctap_buffer+4`. Replaced with a call to the shared `okcrypto_xwing_web_derive()`. |
 | 19 | Reverse interop: encrypt web app → decrypt CLI | PASS | `test/15`. Same root cause and fix as TC-18; both directions were blocked by it. |
 
-**Totals (2026-08-01):** Pass **18**  Partial **1** (TC-11)  Fail 0  Not run 0
+**Totals (2026-08-01):** Pass **19**  Partial 0  Fail 0  Not run 0
 
 ## 3a. Status summary
 
-**18 of 19 cases pass on real hardware.** TC-11 (composite PGP-PQC) is the only
-one outstanding, and it is genuinely partial rather than untried: composite key
-generation, `setpqc` loading, and **both halves of composite signing now work on
-the device** — Ed25519 (64 B) and ML-DSA-65 (3309 B), each verified against the
-public key derived from the same seed. What remains is composite **decrypt** and
-the **browser** path; see TEST-PLAN.md's TC-11 entry.
+**All 19 cases pass on real hardware.** TC-11, the last one outstanding, closed
+on 2026-08-01: the web app generates a composite key, the CLI loads it with
+`setpqc`, and the browser then encrypts, decrypts on-device, signs on-device and
+verifies — `Signature VALID` — with the device confirming all four operations
+over the FIDO2 bridge.
+
+Two things are still genuinely untested and should not be read into that: GnuPG
+interop for composite PGP-PQC (needs a composite-PQC-aware GnuPG, algo 105/107,
+which this host does not have), and backup-file creation plus HMAC
+challenge-response, for which no tooling exists in these repos at all.
 
 The ML-DSA half was never a crypto problem, and it was not a buffer-capacity
 problem either, though it presented as one for a long time. The device staged a
@@ -150,10 +154,21 @@ isolation and had intermittently timed out inside a full-suite run. It passed
 in-suite on both 2026-08-01 runs after the assertion-sizing change; not declared
 resolved on two observations, but no longer reproducing.
 
-Full suite status on the 2026-08-01 firmware: **40 passing, 0 failing, 10
-pending** (4m), including the two composite-decrypt cases and a full
-regeneration of the X-Wing keys after the reflash. The pending ones are deliberate skips — TC-07 needs a physical
-unplug, and the GUI specs skip what the browser lib cannot yet do.
+Full suite status on the 2026-08-01 firmware: **47 passing, 0 failing, 3
+pending** (6m), with the nwjs harness running so the GUI specs execute rather
+than skip — including the full browser TC-11 lifecycle (65s). The three pending
+are deliberate: SETUP-03/04 self-skip on an already-initialised device, and
+TC-07 needs a physical unplug.
+
+The pending count was 10 before the GUI specs started running, which is what
+kept a fixture collision hidden: `test/17-nwjs` generates a FRESH composite key
+each run and had been loading it into RSA1, the slot `test/17-nodejs` keeps its
+cached blob in. One run after the GUI case stopped skipping, the Node spec
+failed all seven cases with every device value "differing from the host" — which
+looks exactly like a firmware regression and was nothing of the kind, since the
+GUI's key is perfectly valid. Split onto RSA2. Second time today the same shape
+of bug appeared (see `test/12` → RSA4): **a fixture another spec depends on
+needs a slot of its own.**
 
 The run before this one had 5 failures, all in `test/17-nodejs-composite-pgp`
 and all one cause, worth recording because it looked like a firmware regression
