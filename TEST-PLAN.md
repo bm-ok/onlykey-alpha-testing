@@ -194,7 +194,7 @@ and stops), which is why ENC-05–08 need nothing plugged in and ENC-09 does.
 
 | ID | Title | Status | Notes |
 |----|-------|--------|-------|
-| TC-11 | Generate composite key → `setpqc` load → web app encrypt/decrypt/sign | 🟡 **partial** (2026-08-01): steps 1-2 pass, sign's Ed25519 half passes on hardware 6/6, ML-DSA half blocked | **Approach changed deliberately: driven from Node, not the browser.** The NW.js GUI raises an unmanageable native popup, and the composite crypto (`composite_pgp.js`) is plain CommonJS taking `openpgp` and an `ok` object as parameters - so the real production module runs in Node against the real device with no browser at all (`lib/fido2/openpgp_node.js` loads the vendored PQC openpgp.js fork via `readFileSync` + `new Function`, the same trick `python-onlykey`'s own bridge uses). Once this works, porting it to the browser makes the GUI path work; doing it the other way round means debugging two unknowns at once. <br>**The blocking discovery: `composite_sign()`/`composite_decrypt()` never existed.** `composite_pgp.js`'s hardware hooks call `ok.composite_sign(slot, half, hashed)` and `ok.composite_decrypt(slot, data)`, and its comment says both live in `onlykey-3rd-party.js` - but a full-tree search of `onlykey.github.io` finds no definition of either, in this workspace or the imported one. That file defines only `api.derive_public_key` (:421) and `api.derive_shared_secret` (:509). So `ok.composite_sign` was `undefined` and the signing hook could never have run, no matter how many times it was retried. Built as `lib/fido2/composite.js` here. <br>**Protocol, read from firmware rather than inferred:** the keyhandle carries `(cmd, opt1, opt2, opt3, data)` where `opt1` is the **slot** and the firmware does its own 57-byte chunking (`ok_extension.cpp` ~395-425) - the host sends the whole payload in one request, and **`opt2` must be truthy** or the device never sees a final packet and never primes the challenge. Payload is `[selector] || digest`, selector `PQC_HALF_ECC=0` (Ed25519, 64 B out) or `PQC_HALF_PQC=1` (ML-DSA-65, 3309 B out), read at `okpqc.cpp:92`. Both gated on `CRYPTO_AUTH==4`. <br>**Vendor payloads on this branch must be encrypted with the OKCONNECT transit key** - `ok_extension.cpp:367` calls `okcrypto_aes_crypto_box(client_handle, handle_len, true)` on entry. Plaintext is "decrypted" into garbage, accumulated, and the challenge computed over bytes the host never saw. Proven live by tracing two prints: the `Keyhandle:` dump matched the plaintext exactly, the OKSIGN chunk after it did not. <br>**`stored_key_challenge_mode` must be 0.** When non-zero, `done_process_packets()` (`okcore.cpp:7332`) sets `CRYPTO_AUTH=3` and **skips computing `Challenge_button1/2/3` entirely**, leaving stale values that no freshly-computed digit can match. `setStoredKeyChallengeMode(0)` (`gui_helpers.js`) forces it, exactly as TC-18/19 forces the derived flag. <br>**Three firmware bugs found and fixed in `okpqc.cpp`:** (1) `extern uint32_t packet_buffer_details[]` where the definition (`okcore.cpp:260`) is `uint8_t[5]` - a 4-byte stride meant `[1]` read byte 4 and `[2]` read *past the array*. One mismatch, two symptoms: the decrypt ran with the wrong slot so `large_buffer[0]` wasn't the selector and the device signed the **ML-DSA** half for an Ed25519 request (3309 bytes where 64 were expected), and `outputmode` restored from out-of-bounds memory was never `WEBAUTHN`, so the response went out over raw HID where no OKPING poll could find it. Both cleared together. (2) `okpqc.cpp` includes neither `onlykey.h` nor `Arduino.h`, so every `#ifdef DEBUG` block in it compiled to nothing - no okpqc trace output existed. (3) `okpqc_x25519_shared()` never clamped its scalar; `Curve25519::eval()` expects an already-clamped one (the library's own `dh1()` clamps first). Matters for composite decrypt, not signing. <br>**Result: the Ed25519 half works end-to-end on hardware, 6/6** - host-side keygen → `setpqc RSA1` → device signs → signature verifies against the generated public key with tweetnacl. <br>**ML-DSA half: transport proven, verification open.** `store_FIDO_response()` (`fido2/device.cpp:123`) starts `if (len >= LARGE_RESP_BUFFER_SIZE) return;` and silently drops anything ≥1024 - the actual reason a 3309-byte signature never came back. With the buffer enlarged and chunked retrieval added, **all 3309 bytes were signed and retrieved over the FIDO2 bridge** (twice), reassembled host-side from ~47 chunks of 71 bytes. But the signature does not verify, and openpgp.js/@noble derive byte-identical ML-DSA public keys from the same seed - so the seed convention is not the cause and the open question is message framing (`signature(..., ctx=NULL, ctxlen=0, ...)`: external `0x00\|\|0x00\|\|digest` vs internal raw digest). Not yet answered - two runs died on device flakiness before reaching the check. <br>**The buffer change is reverted** and must be solved differently: `LARGE_RESP_BUFFER_SIZE` is load-bearing for two buffers at once (see QUIRKS.md). Growing it 1024→3328 slid `large_buffer` into X-Wing's `pk_M` range (2400-3616) and broke TC-05; giving `large_resp_buffer` its own array fixed TC-05 and broke the FIDO2 OKCONNECT handshake. The overlay is depended on in both directions. <br>**Not attempted:** composite decrypt (step 3), and the GUI path (`test/17-gui-composite-pgp.test.js`, imported from the other workspace, fails at the OKCONNECT handshake - expected, since the browser lib still lacks the two methods above). |
+| TC-11 | Generate composite key → `setpqc` load → web app encrypt/decrypt/sign | 🟡 **partial** (2026-08-01): **sign passes on hardware, BOTH halves** — `test/17-nodejs-composite-pgp.test.js` 6/6, Ed25519 (64 B) and ML-DSA-65 (3309 B) signatures both verify. Decrypt (step 3) and the browser path still open | **Approach changed deliberately: driven from Node, not the browser.** The NW.js GUI raises an unmanageable native popup, and the composite crypto (`composite_pgp.js`) is plain CommonJS taking `openpgp` and an `ok` object as parameters - so the real production module runs in Node against the real device with no browser at all (`lib/fido2/openpgp_node.js` loads the vendored PQC openpgp.js fork via `readFileSync` + `new Function`, the same trick `python-onlykey`'s own bridge uses). Once this works, porting it to the browser makes the GUI path work; doing it the other way round means debugging two unknowns at once. <br>**The blocking discovery: `composite_sign()`/`composite_decrypt()` never existed.** `composite_pgp.js`'s hardware hooks call `ok.composite_sign(slot, half, hashed)` and `ok.composite_decrypt(slot, data)`, and its comment says both live in `onlykey-3rd-party.js` - but a full-tree search of `onlykey.github.io` finds no definition of either, in this workspace or the imported one. That file defines only `api.derive_public_key` (:421) and `api.derive_shared_secret` (:509). So `ok.composite_sign` was `undefined` and the signing hook could never have run, no matter how many times it was retried. Built as `lib/fido2/composite.js` here. <br>**Protocol, read from firmware rather than inferred:** the keyhandle carries `(cmd, opt1, opt2, opt3, data)` where `opt1` is the **slot** and the firmware does its own 57-byte chunking (`ok_extension.cpp` ~395-425) - the host sends the whole payload in one request, and **`opt2` must be truthy** or the device never sees a final packet and never primes the challenge. Payload is `[selector] || digest`, selector `PQC_HALF_ECC=0` (Ed25519, 64 B out) or `PQC_HALF_PQC=1` (ML-DSA-65, 3309 B out), read at `okpqc.cpp:92`. Both gated on `CRYPTO_AUTH==4`. <br>**Vendor payloads on this branch must be encrypted with the OKCONNECT transit key** - `ok_extension.cpp:367` calls `okcrypto_aes_crypto_box(client_handle, handle_len, true)` on entry. Plaintext is "decrypted" into garbage, accumulated, and the challenge computed over bytes the host never saw. Proven live by tracing two prints: the `Keyhandle:` dump matched the plaintext exactly, the OKSIGN chunk after it did not. <br>**`stored_key_challenge_mode` must be 0.** When non-zero, `done_process_packets()` (`okcore.cpp:7332`) sets `CRYPTO_AUTH=3` and **skips computing `Challenge_button1/2/3` entirely**, leaving stale values that no freshly-computed digit can match. `setStoredKeyChallengeMode(0)` (`gui_helpers.js`) forces it, exactly as TC-18/19 forces the derived flag. <br>**Three firmware bugs found and fixed in `okpqc.cpp`:** (1) `extern uint32_t packet_buffer_details[]` where the definition (`okcore.cpp:260`) is `uint8_t[5]` - a 4-byte stride meant `[1]` read byte 4 and `[2]` read *past the array*. One mismatch, two symptoms: the decrypt ran with the wrong slot so `large_buffer[0]` wasn't the selector and the device signed the **ML-DSA** half for an Ed25519 request (3309 bytes where 64 were expected), and `outputmode` restored from out-of-bounds memory was never `WEBAUTHN`, so the response went out over raw HID where no OKPING poll could find it. Both cleared together. (2) `okpqc.cpp` includes neither `onlykey.h` nor `Arduino.h`, so every `#ifdef DEBUG` block in it compiled to nothing - no okpqc trace output existed. (3) `okpqc_x25519_shared()` never clamped its scalar; `Curve25519::eval()` expects an already-clamped one (the library's own `dh1()` clamps first). Matters for composite decrypt, not signing. <br>**Result: the Ed25519 half works end-to-end on hardware, 6/6** - host-side keygen → `setpqc RSA1` → device signs → signature verifies against the generated public key with tweetnacl. <br>**ML-DSA half: signs, retrieves and VERIFIES (2026-08-01).** Three separate defects, each of which alone was enough to hide the signature; the last one is the interesting one. (1) `store_FIDO_response()` (`fido2/device.cpp:123`) started `if (len >= LARGE_RESP_BUFFER_SIZE) return;` and silently dropped anything ≥1024, so a 3309-byte response was discarded with no error - now staged in a dedicated 3328-byte array, with the space taken from *stack* (`CTAP_RESPONSE_BUFFER_SIZE` 4096→2048) rather than from `ctap_buffer`, since the overlay is load-bearing in both directions (see QUIRKS.md). (2) `ctap.cpp` sized the assertion from `large_resp_buffer_offset`, the whole response rather than the chunk written - fixed to `output_buffer_offset + 1`. (3) **The assertion length was gated on `pending_operation`, a global another code path owns** - see the section below. Until that was removed the host received 71 bytes of every 512-byte chunk while the device's cursor advanced a full 512, so the reassembled signature was real bytes in the wrong places and verified under no framing. Framing was never the problem: with the transport correct, `ml_dsa65.verify(sig, digest, pk)` returns true first try - FIPS 204 external API, empty context, matching the firmware's `signature(..., ctx=NULL, ctxlen=0, ...)`. Measured: **7 chunks of 512, 3309 bytes, `external: true`.** <br>**Not attempted:** composite decrypt (step 3), and the GUI path (`test/17-gui-composite-pgp.test.js`, imported from the other workspace, fails at the OKCONNECT handshake - expected, since the browser lib still lacks the two methods above). |
 
 ## 6. Regression + security (maintainer TC-12–TC-14)
 
@@ -301,7 +301,7 @@ the number of bytes actually written into `sigder` by this round trip. So:
 - a response of 513 B or more takes the `else` branch and returns **72 bytes**,
   whatever was written;
 - the chunking added to `send_stored_response()` (`ok_extension.cpp`,
-  `MAX_LARGE_RESP_CHUNK 500`) is therefore **inert by construction** — it can
+  `MAX_LARGE_RESP_CHUNK`, 500 at the time and 512 now) is therefore **inert by construction** — it can
   write a correct 500-byte chunk and still have the length reported as 72.
 
 That is why a 3309-byte ML-DSA-65 signature cannot come back regardless of
@@ -311,7 +311,11 @@ That is why a 3309-byte ML-DSA-65 signature cannot come back regardless of
 non-static global holding exactly the byte count `extension_writeback()` wrote,
 and `extend_fido2()` puts a status byte at `output[0]` with data from
 `output+1`. So the length that is actually correct here is
-`output_buffer_offset + 1`. Not yet applied — see the caveat below.
+`output_buffer_offset + 1`. **Applied** (`libraries` 21a9b24) — but that alone
+did not deliver the signature, because the surrounding `pending_operation` gate
+was a second, independent fault in the same expression. See "The assertion
+length was gated on a global another code path owns" below, which is the one
+that actually mattered.
 
 **2. The host does not reassemble chunks.** Even with the length fixed, the web
 app's retrieval loop takes the first poll that returns an array as the complete
@@ -332,14 +336,15 @@ cannot deliver it unilaterally.
 |---|---|---|
 | RSA-2048 signature | 256 | yes |
 | RSA-3072 signature | 384 | yes |
-| RSA-4096 signature | 512 | yes, but > `MAX_LARGE_RESP_CHUNK` (500) |
+| RSA-4096 signature | 512 | yes, and exactly `MAX_LARGE_RESP_CHUNK` (512) — one chunk |
 | ML-DSA-65 signature | 3309 | no |
 
-RSA-4096 is the case worth watching: it fits the 513-byte assertion but exceeds
-the 500-byte chunk size, so the chunking splits a response that previously went
-in one piece — into a host that cannot reassemble. Not yet reproduced on
-hardware (no classic RSA-4096 key is provisioned on this device), so this is
-stated as a read of the code, not a measurement.
+RSA-4096 is the case worth watching. At `MAX_LARGE_RESP_CHUNK 500` it exceeded
+one chunk, so the chunking would have split a response that previously went in
+one piece, into a host that cannot reassemble. At 512 it is exactly one chunk
+and the split does not arise — but that is a one-byte margin holding it, not a
+design. Not reproduced on hardware either way (no classic RSA-4096 key is
+provisioned on this device), so this is a read of the code, not a measurement.
 
 One more detail from the same reading, worth recording because it makes the
 duplicate-suppression look like it works when it doesn't: the web app sends
@@ -378,10 +383,72 @@ Two consequences:
    classic RSA path. Applied to `onlykey-3rd-party.js`'s `poll_for_response`
    and `lib/fido2/composite.js`'s `pollForResponse`.
 2. **It is a memory disclosure**, small but real: 71 bytes of recent firmware
-   stack to any origin that can reach the extension path. The firmware fix is
-   to send `sigder_sz = 1` (status byte only) when `output_buffer_offset` is 0,
-   rather than padding to 72. Not applied — it needs its own flash cycle and
-   its own regression pass, and the host-side fix already unblocks TC-11.
+   stack to any origin that can reach the extension path. **Fixed in firmware
+   2026-08-01** (`libraries` 9b77a77): `solo.cpp` declares an empty payload
+   before dispatching the OnlyKey commands, which all reply through
+   `extension_writeback()`, so a poll that serves nothing leaves
+   `output_buffer_size == 0` and `ctap.cpp` sends `sigder_sz = 1` — the status
+   byte alone, no padding. The 71-byte default remains for the Wallet
+   operations, which write into the output buffer directly rather than through
+   `extension_writeback()`.
+
+## The assertion length was gated on a global another code path owns — found and fixed 2026-08-01
+
+The defect that actually kept the ML-DSA-65 signature from verifying, after both
+buffer-sizing faults above were fixed. Worth recording in full because the
+symptom pointed nowhere near the cause, and the obvious control case *passed*.
+
+`ctap_end_get_assertion()` sized the response only when the gate held:
+
+```c
+if ((pending_operation==CTAP2_ERR_DATA_READY || pending_operation==CTAP2_ERR_DATA_WIPE)
+    && output_buffer_offset+1 < sizeof(sigder)) {
+    sigder_sz = output_buffer_offset+1;
+} else sigder_sz = 72;
+```
+
+`pending_operation` is owned elsewhere. `process_packets()` (`okcore.cpp:7215`)
+sets it to `CTAP2_ERR_NO_OPERATION_PENDING` on its first lines, on **every**
+inbound raw-HID packet — which includes the CTAPHID packets carrying the polls
+being answered. By the time the gate runs it no longer describes the request in
+hand, so the response fell to the 72-byte default while
+`send_stored_response()` still advanced `large_resp_buffer_cursor` a full 512.
+
+**Measured live.** Two polls of a staged 3309-byte signature returned 71 bytes
+each. Locating those bytes inside the device's own staged-response DEBUG dump
+put the first at offset **0** and the second at offset **512** — the cursor
+moving 512 while 71 bytes travelled. The host reassembled one byte in seven of
+a genuine signature, sliced it to 3309, and got something that verified under
+no framing. That is what sent the search after the FIPS 204 context encoding.
+
+**Why the control case passed, which is the trap.** The 64-byte Ed25519 half
+runs the identical path and was never affected: a response that fits one chunk
+is *finished* inside `send_stored_response()`, which sets
+`pending_operation = CTAP2_ERR_DATA_WIPE` at `ok_extension.cpp:531` before
+returning — so the gate saw a valid value it had just written itself. A partial
+chunk sets nothing and loses. The failure therefore split by response **size**,
+which is exactly what a buffer-capacity bug looks like, and is why three
+successive rounds of buffer work (`LARGE_RESP_BUFFER_SIZE`, the `ctap_buffer`
+overlay, `CTAP_RESPONSE_BUFFER_SIZE`) each looked plausible and none of them
+fixed it.
+
+**Fix** (`libraries` 9b77a77): size from what the extension declared and wrote
+for *this* request and from nothing else. `solo.cpp` calls
+`extension_writeback_init(output, 0)` before dispatching the OnlyKey commands;
+`send_stored_response()` re-declares the chunk length when it has bytes.
+`output_buffer_size == 0` then means "this poll found nothing to serve".
+`pending_operation` no longer appears in `ctap.cpp` at all.
+
+**Result:** 7 chunks of 512, 3309 bytes, signature verifies. OKCONNECT (TC-09)
+green before and after.
+
+**Host-side counterpart** (`onlykey-testing` 543e447): a truncated chunk cannot
+be told from a whole one by content, because every byte in it is genuine — so
+`pollForResponse()` now rejects any reply that is neither exactly
+`MAX_LARGE_RESP_CHUNK` nor lands exactly on the expected total, and reports what
+it discarded. A short delivery says so instead of being absorbed into a wrong
+answer. `OK_POLL_TRACE=1` logs each poll's status, length and head, which is
+what made the 71-byte deliveries visible in the first place.
 
 ## Known minor issues (non-blocking)
 
