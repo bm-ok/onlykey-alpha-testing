@@ -5,7 +5,7 @@ const fs = require('fs');
 const { FIDO2Client, connect } = require('../lib/fido2/client');
 const { loadOpenpgp } = require('../lib/fido2/openpgp_node');
 const {
-    compositeSign, HALF_ECC, HALF_PQC, ED25519_SIG_LEN, MLDSA_SIG_LEN,
+    compositeSign, compositeDecrypt, HALF_ECC, HALF_PQC, ED25519_SIG_LEN, MLDSA_SIG_LEN,
 } = require('../lib/fido2/composite');
 const { SeremuChannel } = require('../lib/hid');
 const { VENV_BIN } = require('../lib/config');
@@ -14,6 +14,8 @@ const { ensureUnlocked, setStoredKeyChallengeMode } = require('../lib/gui_helper
 
 const compositePgp = require('../../onlykey.github.io/src/onlykey-fido2/onlykey/composite_pgp.js');
 const { ml_dsa65 } = require('@noble/post-quantum/ml-dsa.js');
+const { ml_kem768 } = require('@noble/post-quantum/ml-kem.js');
+const { x25519 } = require('@noble/curves/ed25519.js');
 const nacl = require('tweetnacl');
 
 // NODE-FIRST counterpart to test/17's GUI composite PGP-PQC run (TC-11).
@@ -35,6 +37,11 @@ const nacl = require('tweetnacl');
 //   OKCONNECT        -> do host and device agree on a transit key at all?
 //   Ed25519   (64 B) -> does the composite path work below the staging limit?
 //   ML-DSA-65 (3309) -> the large-response path, retrieved in chunks.
+//   X25519    (32 B) -> decrypt's small half, one keyhandle in.
+//   ML-KEM-768 (1088) -> decrypt's large half, the multi-keyhandle SEND path.
+//
+// Note the two directions stress opposite ends of the transport: signing's
+// hard case is a large RESPONSE, decryption's is a large REQUEST.
 const SLOT = 1;
 
 function runCli(args, { timeoutMs = 20000 } = {}) {
@@ -262,5 +269,71 @@ describe('Composite PGP-PQC over Node FIDO2 (TC-11, node-first)', function () {
             e.message += `\n  device markers: ${JSON.stringify(marks.slice(0, 8))}`;
             throw e;
         }
+    });
+
+    // ---- TC-11 step 3: composite DECRYPT -------------------------------
+    //
+    // Same cheapest-first ordering as signing, and for the same reason: the
+    // two halves share one firmware entry point but nothing else.
+    // okpqc_decrypt() picks the half purely from the INPUT SIZE - 32 bytes is
+    // an X25519 ephemeral point, 1088 is an ML-KEM-768 ciphertext - so there
+    // is no selector byte here, unlike composite_sign.
+    //
+    // That size-dispatch is also why these are worth testing separately from
+    // the openpgp.js round trip: a wrong-sized payload does not fail loudly,
+    // it takes the other branch or the "bad input size" branch, and the only
+    // symptom upstream is a shared secret that does not match.
+
+    it('decrypts the X25519 half (32 B in, 32 B out)', async function () {
+        channel.clearBuffer();
+        // The device holds x25519Sk; derive its public key here so we can play
+        // the sender. An ephemeral keypair on this side gives the 32-byte point
+        // the device is asked to complete.
+        const { x25519Sk } = compositePgp.unpackBlob(blob);
+        const devPub = x25519.getPublicKey(Uint8Array.from(x25519Sk));
+        const ephSk = x25519.utils.randomSecretKey();
+        const ephPub = x25519.getPublicKey(ephSk);
+        const hostShared = Buffer.from(x25519.getSharedSecret(ephSk, devPub));
+
+        const devShared = await compositeDecrypt(
+            fido2, channel, conn.sharedSecret, SLOT, Buffer.from(ephPub));
+
+        assert.strictEqual(devShared.length, 32,
+            `expected a 32-byte X25519 shared secret, got ${devShared.length}`);
+        console.log(`    [x25519] host ${hostShared.toString('hex')}`);
+        console.log(`    [x25519] dev  ${devShared.toString('hex')}`);
+        assert.ok(devShared.equals(hostShared),
+            'device X25519 shared secret differs from the host\'s - the device is not using '
+            + 'the blob\'s x25519Sk, or its scalar clamping differs');
+    });
+
+    it('decrypts the ML-KEM-768 half (1088 B ciphertext in, 32 B out)', async function () {
+        channel.clearBuffer();
+        // The firmware derives its ML-KEM keypair with keypair_derand() using
+        // the stored 64-byte seed DIRECTLY as the (d||z) coins - no SHAKE
+        // expansion, because this is an imported key (okpqc.cpp says so at the
+        // decaps site). @noble's ml_kem768.keygen(seed64) is that same
+        // derandomised keygen, so both sides must land on the same public key.
+        const { mlkemSeed } = compositePgp.unpackBlob(blob);
+        const { publicKey } = ml_kem768.keygen(Uint8Array.from(mlkemSeed));
+        const { cipherText, sharedSecret } = ml_kem768.encapsulate(publicKey);
+        assert.strictEqual(cipherText.length, 1088,
+            `expected a 1088-byte ML-KEM-768 ciphertext, got ${cipherText.length}`);
+
+        // 1088 bytes is the multi-keyhandle send path - the one where a
+        // duplicate-suppression high-water mark shared with RNG output used to
+        // drop early chunks silently, leaving the device to hash a short buffer
+        // and ask for challenge digits over bytes the host never sent.
+        const devShared = await compositeDecrypt(
+            fido2, channel, conn.sharedSecret, SLOT, Buffer.from(cipherText));
+
+        assert.strictEqual(devShared.length, 32,
+            `expected a 32-byte ML-KEM shared secret, got ${devShared.length}`);
+        console.log(`    [ml-kem] host ${Buffer.from(sharedSecret).toString('hex')}`);
+        console.log(`    [ml-kem] dev  ${devShared.toString('hex')}`);
+        assert.ok(devShared.equals(Buffer.from(sharedSecret)),
+            'device ML-KEM-768 decapsulation differs from the host\'s encapsulation - either '
+            + 'the 1088-byte ciphertext did not arrive intact, or the device derives a '
+            + 'different keypair from the stored seed');
     });
 });
