@@ -1,17 +1,28 @@
 # OnlyKey PQC — Test Report
 
-**Build under test (0c-coder fork masters):**
+**Build under test.** The handoff named the `0c-coder` fork masters below.
+Testing did not stay on them: every case that failed produced a fix, so the
+tree actually exercised is those masters plus local commits in the `bm-ok`
+mirrors, none pushed. Quote the "as tested" column when reproducing — the
+firmware in particular is many commits past its handoff SHA, and the version
+string cannot distinguish them (the Docker build's git-SHA stamp is a no-op,
+so every build still reports `-test`; see the workspace CLAUDE.md).
 
-| Component | Repo | master SHA |
-|---|---|---|
-| Firmware libs | 0c-coder/libraries | `7453297` |
-| CLI / age | 0c-coder/python-onlykey | `68c1c84` |
-| Agent | 0c-coder/lib-agent | `8785fc8` |
-| Web app | 0c-coder/onlykey.github.io | `6edad87` |
+| Component | Repo | handoff SHA | as tested 2026-08-01 |
+|---|---|---|---|
+| Firmware libs | 0c-coder/libraries | `7453297` | `689e5a0` |
+| CLI / age | 0c-coder/python-onlykey | `68c1c84` | `5e7b0d2` |
+| Agent | 0c-coder/lib-agent | `8785fc8` | `8785fc8` (unchanged) |
+| Web app | 0c-coder/onlykey.github.io | `6edad87` | `1ea7729` |
 
-**Tester:** ________________  **Date:** __________  **Host OS:** __________
-**OnlyKey model / firmware target:** __________  **Compiler/Teensyduino:** __________
-**age version:** __________  **Python:** __________  **Node:** __________
+**Tester:** Brad Matusiak (`onlykey-testing` automated harness, no human button
+presses)  **Date:** 2026-08-01  **Host OS:** Linux 7.0.0-28-generic
+**OnlyKey model / firmware target:** 6-button dev board (Classic/Color, not
+DUO), MK20DX256 / Teensy 3.2 @ 72 MHz, DEBUG (`-test`) build with SEREMU
+**Compiler/Teensyduino:** Arduino 1.6.5-r5 + Teensyduino 1.27, in Docker
+(`make docker-build`); artifact `arduino-1.6.5-r5-teensy_127/builds/OnlyKey.cpp.hex`
+**age version:** v1.2.1 (`okpqc-venv/bin/age`)  **Python:** 3.14.4 (`okpqc-venv`)
+**Node:** v24.18.1
 
 ---
 
@@ -181,6 +192,26 @@ the one named in the maintainer's own command.
 
 ## 4. Risk register / watch-items (likely failure points)
 
+Written *before* any hardware existed. Outcomes added 2026-08-01 — kept as
+written rather than rewritten, because which predictions held is itself a
+result. Score: 2 of 9 were real (items 3 and 8), and item 8 was called
+precisely. The bugs that actually cost the most time appear nowhere on this
+list: none of them were in the crypto, and the two worst were transport faults
+that returned data of exactly the right length.
+
+| # | Predicted | Outcome |
+|---|---|---|
+| 1 | Compile errors | **No.** Built clean first time and every time since. |
+| 2 | Keytype wire encoding | **No.** Wire keytype 5 → `KEYTYPE_XWING(6)` was correct as written; TC-10 passes. |
+| 3 | Encrypted-profile requirement | **Real.** Keygen and decrypt do silently no-op on `NONENCRYPTEDPROFILE`; the harness provisions an encrypted profile for exactly this reason. |
+| 4 | Transit-key path for the derive response | **No.** The web app decrypts `ENCRYPT_RESP` correctly; TC-10 passes. |
+| 5 | Windows FIDO2 duplicate requests | **Untested** — no Windows host here. Related though: the duplicate-suppression high-water mark it refers to shared a byte with `RNG2` output, which silently dropped multi-chunk requests on *Linux* too. Fixed; see TEST-PLAN.md. |
+| 6 | age plugin discovery | **No.** Tests never rely on `PATH` — they build absolute paths from `VENV_BIN`. |
+| 7 | Web app age container | **No longer applicable.** The container framing was finished; TC-09 passes. |
+| 8 | Derived decaps 64-byte HID framing | **Real, and called exactly right** — down to the mechanism (`buffer[6]` holding a continuation marker where the branch read a keytype). Fixed by dispatching on `buffer[5]`. |
+| 9 | Derived interop conventions | **Real in one respect**, though not as framed: the conventions matched, but the FIDO2 derive path had an inline duplicate of the derive logic that never staged the `onlyagent.app` RPID, so browser and CLI derived different keys. Both TC-18 and TC-19 were blocked by it. |
+
+
 1. **Compile errors (TC-01)** — highest risk. The X-Wing base and my `ok_extension.cpp` derive block merged cleanly *textually*, but were never compiled. Watch for: undefined `SHA256_CTX`/`sha256_*` in `ok_extension.cpp` scope, `device_set_status`/`ctap_user_presence_test` availability there, response-buffer sizing (`32 + sizeof(UNLOCKED) + 1 + 64`), and any duplicate/again-declared PQ symbols where the composite-PGP and X-Wing code meet in `okcrypto.cpp`/`okcore.h`.
 2. **Keytype wire encoding** — the FIDO2 derive uses wire keytype **5** → `KEYTYPE_XWING(6)` after firmware `opt2++`. If the web app and firmware disagree here, derive returns the wrong key type. Verify in TC-10.
 3. **Encrypted-profile requirement** — keygen/decrypt silently no-op on a non-encrypted profile. If TC-04/05 "do nothing," check the profile.
@@ -193,9 +224,19 @@ the one named in the maintainer's own command.
 
 ## 5. Sign-off
 
-- [ ] All PASS, or failures triaged with issues filed (repo + SHA + command + output).
-- [ ] Firmware build artifact (`.hex`) archived with compiler version.
+- [x] All PASS, or failures triaged with issues filed (repo + SHA + command +
+      output). All 19 cases PASS on hardware; every failure found along the way
+      was fixed rather than triaged, with the writeup in
+      `onlykey-testing/TEST-PLAN.md` (file/line references per bug) and the
+      reasoning in the commit messages of the `bm-ok` mirrors.
+- [x] Firmware build artifact (`.hex`) archived with compiler version.
+      `arduino-1.6.5-r5-teensy_127/builds/OnlyKey.cpp.hex`, Arduino 1.6.5-r5 +
+      Teensyduino 1.27 in Docker. **Caveat: the artifact cannot identify
+      itself** — the build's git-SHA stamp is a no-op, so every build reports
+      `v3.0.4-test`. Archive it alongside its commit SHA or it is unidentifiable.
 - [ ] Go / No-go for promoting from `0c-coder` test masters: ______________
+      *(maintainer's call — nothing has been pushed; all fixes are local commits
+      in the `bm-ok` mirrors awaiting review.)*
 
 **Notes:**
 
@@ -219,6 +260,28 @@ and re-verified TC-04 against it — see TC-04's row above and
 `0c-coder-python-onlykey`; the earlier `python-onlykey` fixes (message
 type, slot constants) turned out to be specific to the stale clone and
 don't apply to the correct one.
+
+**TC-11 closed, all 19 cases PASS (2026-08-01):** composite PGP-PQC now works
+end to end in the web app — generate → `onlykey-cli setpqc` load → encrypt →
+device decrypt → device sign → verify, ending in `Signature VALID`, with the
+device confirming all four operations (X25519, ML-KEM-768, and both signature
+halves) over the FIDO2 bridge. Proven first in Node
+(`test/17-nodejs-composite-pgp.test.js`, 8/8) against independently computed
+values, then in the browser (`test/17-nwjs-composite-pgp.test.js`, 65s). Full
+suite: 47 passing, 0 failing, 3 pending.
+
+Three firmware bugs closed it, and all three returned *plausible* data rather
+than errors — which is why they took as long as they did:
+(1) `ctap_end_get_assertion()` sized WebAuthn responses from `pending_operation`,
+a global `process_packets()` rewrites on every inbound HID packet, so the host
+received 71 bytes of each 512-byte chunk while the device's cursor advanced a
+full 512 — a signature reassembled from genuine bytes in the wrong places;
+(2) `store_FIDO_response()` cleared `large_resp_buffer` before copying from it,
+and composite decrypt stages its shared secret in that same buffer, so a correct
+X25519 secret arrived as 32 zero bytes with no error on either side;
+(3) the 72-byte default response shipped 71 bytes of uninitialised stack behind a
+success status — a small but real memory disclosure, now answered with the
+status byte alone. Fixes are local commits in `bm-ok/libraries`, not pushed.
 
 **TC-05/TC-06 completed, workspace reset (2026-07-23, later same day):**
 the workspace was reset and `project-setup.sh` rewritten to clone the
