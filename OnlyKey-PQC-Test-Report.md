@@ -75,7 +75,7 @@ against each item; the detail sits in the results matrix and in TEST-PLAN.md.
 | 08 | Web app build + `test:pqc` | PASS | `npm run test:pqc` prints `pass 6, fail 0` (the maintainer's 5 cases plus a fixed-vector cross-check against Python's `derived_xwing.py`). Re-run 2026-08-01; also proves the webpack build. |
 | 09 | Derived X-Wing browser roundtrip | PASS | `test/10-fido2-xwing-derive.test.js`: device derive → host-side X-Wing encaps → device decap → combiner, shared secrets match byte-for-byte. Deterministic per label, different per label. The maintainer's "may be BLOCKED on container TODO" applied to the browser age-file container specifically; the cryptographic round-trip it wraps is proven. |
 | 10 | Device derive protocol (low-level) | PASS | `test/09`/`test/10`. FIDO2/CTAP2 client built from scratch (`lib/fido2/`). Derive/decap are `cmd=OKCONNECT` with `opt1` selecting `DERIVE_PUBLIC_KEY`/`DERIVE_SHAREDSEC` (+`_REQ_PRESS`) and `opt2=5` on the wire — **not** the `OKGETPUBKEY`/`OKDECRYPT` entries in `okcrypto.cpp`, which are unreachable over this bridge. <br>**Known flakiness:** `test/09`'s OKCONNECT handshake passes reliably in isolation (2/2, 7s) and intermittently times out inside a full-suite run. Unresolved. |
-| 11 | PGP-PQC gen→load→encrypt/decrypt/sign | **PARTIAL** | See TEST-PLAN.md's TC-11 entry for full detail. Steps 1-2 and the Ed25519 half of step 4 pass on hardware; the ML-DSA half and decrypt do not yet. |
+| 11 | PGP-PQC gen→load→encrypt/decrypt/sign | **PARTIAL** | See TEST-PLAN.md's TC-11 entry for full detail. Steps 1-2 pass, and **step 4 (sign) now passes on hardware for both halves** — Ed25519 (64 B) and ML-DSA-65 (3309 B, retrieved in 7 chunks of 512), each verified against the public key derived from the same seed. `test/17-nodejs-composite-pgp.test.js` 6/6. Step 3 (decrypt) is not yet attempted, and the browser path (`test/17-nwjs-...`) is not yet confirmed — so the case stays PARTIAL. |
 | 12 | `hidraw` transport (#89) | PASS | `hidraw` (not the `hid` fallback) is what imports in `okpqc-venv` on this Linux box; dozens of back-to-back CLI invocations across the suite with zero interface-contention errors. |
 | 13 | Reserved-slot guard: backup/HMAC/SSH/GPG intact | PASS | `test/06` (SSH derived keys), `test/07` (GPG identity end-to-end), `test/08` (hmackeymode/backupkeymode toggles + malformed-backup rejection). Backup *file creation* and HMAC challenge-response are not testable from this repo — no tooling exists for either. |
 | 14 | Packaging versions/description | PASS | `onlykey` 1.2.11, `lib-agent` 1.0.8, `onlykey-agent` 1.1.16, all editable; `twine check` clean (`lib-agent` has cosmetic-only warnings). |
@@ -91,10 +91,17 @@ against each item; the detail sits in the results matrix and in TEST-PLAN.md.
 
 **18 of 19 cases pass on real hardware.** TC-11 (composite PGP-PQC) is the only
 one outstanding, and it is genuinely partial rather than untried: composite key
-generation, `setpqc` loading, and the **Ed25519 half of composite signing all
-work on the device (6/6 runs, signature verified against the generated public
-key)**. The ML-DSA-65 half is blocked on a firmware buffer-sizing conflict, not
-on the crypto — see TEST-PLAN.md's TC-11 entry.
+generation, `setpqc` loading, and **both halves of composite signing now work on
+the device** — Ed25519 (64 B) and ML-DSA-65 (3309 B), each verified against the
+public key derived from the same seed. What remains is composite **decrypt** and
+the **browser** path; see TEST-PLAN.md's TC-11 entry.
+
+The ML-DSA half was never a crypto problem, and it was not a buffer-capacity
+problem either, though it presented as one for a long time. The device staged a
+correct 3309-byte signature and advanced its retrieval cursor 512 bytes per
+poll, but only 71 bytes per poll reached the host, so the reassembled signature
+was genuine bytes in the wrong places and verified under no framing. Root cause
+in the section below.
 
 Getting to 18/19 required firmware fixes in every area the maintainer flagged
 as risky, plus several nobody had predicted. The ones worth the maintainer's
@@ -110,6 +117,25 @@ attention:
   is why a 3309-byte ML-DSA signature never returned. Raising the limit is not
   a safe fix on its own: `LARGE_RESP_BUFFER_SIZE` also positions
   `large_buffer`, and growing it moves that into the X-Wing scratch region.
+  Resolved by giving `large_resp_buffer` its own 3328-byte array and taking the
+  RAM from *stack* (`CTAP_RESPONSE_BUFFER_SIZE` 4096→2048), leaving the
+  `ctap_buffer` overlay alone. It now reports oversize instead of returning
+  silently.
+- **`ctap_end_get_assertion()` sized the WebAuthn response from
+  `pending_operation`, a global that `process_packets()` (`okcore.cpp`) rewrites
+  on every inbound raw-HID packet** — including the CTAPHID packets carrying the
+  polls being answered. When the gate failed, the assertion fell to a 72-byte
+  default while `send_stored_response()` still advanced the chunk cursor a full
+  512, so the host silently received one byte in seven of the signature. This is
+  the finding most worth the maintainer's attention, because of how it hides:
+  **a response that fits one chunk is immune**, since that path sets
+  `pending_operation` itself before returning. The failure therefore splits by
+  response *size* and looks exactly like a buffer-capacity bug — the 64-byte
+  Ed25519 half passing throughout is what made three rounds of buffer work each
+  look plausible. Fixed by sizing from what the extension declared and wrote for
+  the request in hand (`libraries` 9b77a77); `pending_operation` no longer
+  appears in `ctap.cpp`. It also affects the classic RSA path, which shares this
+  transport, for any response served in more than one chunk.
 - **The FIDO2 derive path had an inline duplicate of the derive logic** that
   never staged the `onlyagent.app` RPID, so browser and CLI could never agree
   on a key. Both interop cases (TC-18/19) were blocked by this one bug.
@@ -120,8 +146,11 @@ Known flakiness, unresolved: `test/09`'s FIDO2 OKCONNECT handshake passes
 reliably in isolation and intermittently times out inside a full-suite run.
 
 Full suite status: **32-34 passing, 0-3 failing** depending on that
-intermittency and on `test/17` (the TC-11 GUI test, expected to fail until the
-browser lib gains `composite_sign`/`composite_decrypt`).
+intermittency and on `test/17-nwjs-composite-pgp` (the TC-11 GUI test, expected
+to fail until the browser lib gains `composite_sign`/`composite_decrypt`).
+**Measured before the 2026-08-01 assertion-sizing firmware change**; the suite
+has not been re-run end to end since that flash. Individually re-verified after
+it: `test/00-setup`, `test/09` (twice) and `test/17-nodejs-composite-pgp` (6/6).
 
 ## 4. Risk register / watch-items (likely failure points)
 
