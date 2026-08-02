@@ -134,7 +134,17 @@ describe('Non-PQ regression: slot labels, classic ECC + RSA keys (TC-15)', funct
 
     it('loads a real RSA-2048 private key on-device, no button confirmation needed', async function () {
         this.timeout(60000); // gpg keygen + export + multi-message OKSETPRIV load
-        const result = await generateAndLoadRsaKey({ slot: 1, features: 'd' });
+        // RSA4, not RSA1. TC-11 keeps its composite blob in RSA1 - that slot is
+        // named in the maintainer's own command (`onlykey-cli setpqc RSA1`),
+        // whereas the slot for this throwaway key is arbitrary. This file sorts
+        // before test/17, so loading here overwrote the composite blob AND left
+        // the slot flagged `d` (decrypt-only): every TC-11 case then failed with
+        // the device reporting "Error key not set as signature key". Measured in
+        // the 2026-08-01 full-suite run - 5 failures, all one cause, while the
+        // same spec passed 6/6 run alone minutes earlier. The comment above
+        // about avoiding slots 101/103 had the right instinct and only ever
+        // covered the ECC slots.
+        const result = await generateAndLoadRsaKey({ slot: 4, features: 'd' });
         assert.strictEqual(result.code, 0, `RSA load failed:\n${result.stderr}\n${result.stdout}`);
         assert.match(
             `${result.stdout}${result.stderr}`,
