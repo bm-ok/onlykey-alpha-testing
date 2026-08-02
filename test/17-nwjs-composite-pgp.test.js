@@ -173,6 +173,34 @@ function parseReceivedMessage(buffer) {
     return Buffer.from(bytes);
 }
 
+// Waits for the challenge-primed print, with a budget that measures SILENCE
+// rather than elapsed time.
+//
+// A flat timer cannot work here. The browser sends an ML-KEM-768 ciphertext as
+// five separate WebAuthn ceremonies, and the device only primes the challenge
+// once the final packet lands - so the wait legitimately spans the whole send.
+// Measured 2026-08-01: a 5s flat budget expired mid-send, with the device
+// visibly healthy and printing "OKDECRYPT Chunk" for every packet it received.
+//
+// Any new device output is proof of life, so it re-arms the budget; the wait
+// only fails when the device has genuinely gone quiet. That keeps the fail-fast
+// property (a wedged device is caught in `idleMs`) without capping how long a
+// legitimately long operation may take.
+async function waitForPrimedWhileActive(channel, idleMs) {
+    let deadline = Date.now() + idleMs;
+    let seen = channel.buffer.length;
+    while (Date.now() < deadline) {
+        if (PRIMED_RE.test(channel.buffer)) return;
+        // eslint-disable-next-line no-await-in-loop
+        await sleep(100);
+        if (channel.buffer.length !== seen) {
+            seen = channel.buffer.length;
+            deadline = Date.now() + idleMs;
+        }
+    }
+    throw new Error('not primed');
+}
+
 async function confirmOneChallenge(channel, challenge, { primedTimeoutMs = NO_RESPONSE_TIMEOUT_MS, ackTimeoutMs = 8000 } = {}) {
     const digits = challenge.digits || challenge;
     const expectedPayload = challenge.payload || null;
@@ -182,11 +210,12 @@ async function confirmOneChallenge(channel, challenge, { primedTimeoutMs = NO_RE
     channel.clearBuffer();
 
     try {
-        await channel.waitFor(PRIMED_RE, primedTimeoutMs);
+        await waitForPrimedWhileActive(channel, primedTimeoutMs);
     } catch (e) {
         throw new Error(
-            `device never primed the challenge (no "Encrypted Buffer" within ${primedTimeoutMs}ms) - ` +
-            'refusing to enter digits blind, since a wrong challenge counts against the self-destruct PIN'
+            `device never primed the challenge (no "Encrypted Buffer" within ${primedTimeoutMs}ms ` +
+            'of SILENCE) - refusing to enter digits blind, since a wrong challenge counts against ' +
+            'the self-destruct PIN'
         );
     }
 
@@ -431,11 +460,17 @@ async function clickVerifyAndCollect(armoredSignedMessage) {
     const { value, errors: pageErrors } = await evalInPage(`
         document.getElementById('pgp_verify_in').value = ${JSON.stringify(armoredSignedMessage)};
         document.getElementById('pgp_verify').click();
+        // Wait for a TERMINAL status, not merely a non-empty one. The click
+        // handler sets "Verifying..." synchronously, so breaking on the first
+        // non-empty value always captured that transient string and reported
+        // it as the verdict - the assertion then failed with "expected a valid
+        // signature, got: Verifying...", which reads like a verification
+        // failure and is really a read taken too early.
         const deadline = Date.now() + 15000;
         let status = '';
         while (Date.now() < deadline) {
             status = document.getElementById('pgp_verify_status').textContent;
-            if (status) break;
+            if (status && !/^Verifying/.test(status)) break;
             await new Promise((r) => setTimeout(r, 300));
         }
         return status;
@@ -445,10 +480,22 @@ async function clickVerifyAndCollect(armoredSignedMessage) {
 }
 
 describe('GUI: Composite PGP-PQC (browser-driven, real device) (TC-11)', function () {
-    // No multi-minute overrides. Every wait inside this file honours the 30s
-    // no-response rule (lib/config.js NO_RESPONSE_TIMEOUT_MS), so mocha's own
-    // timeout should never be what stops a run - if it ever fires, something
-    // is waiting without a response check and THAT is the bug to fix.
+    // Every wait inside this file is response-driven and bounded by SILENCE
+    // (lib/config.js NO_RESPONSE_TIMEOUT_MS), so a wedged device is still
+    // caught in seconds. Mocha's cap is only the backstop behind those.
+    //
+    // It is raised here because this single case is the entire TC-11 lifecycle,
+    // and the device work alone exceeds a minute: a config-mode `setpqc` load
+    // costs two restarts, composite decrypt is two device operations (the
+    // ML-KEM half sending 1088 bytes as five WebAuthn ceremonies), and
+    // composite signing is two more, of which the ML-DSA-65 half costs the
+    // device ~10s of compute before its first response byte exists. Measured
+    // 2026-08-01: all four confirmations succeeded and the run was killed at
+    // 60s partway through the tail.
+    //
+    // Raising the backstop is not the same as waiting on a timer - nothing
+    // below sleeps for a fixed period or proceeds without a device response.
+    this.timeout(240000);
 
     let channel;
 
