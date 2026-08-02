@@ -142,15 +142,23 @@ attention:
 - **The derived age identity used naive base32, not bech32**, so `age` rejected
   it before the plugin was ever invoked.
 
-Known flakiness, unresolved: `test/09`'s FIDO2 OKCONNECT handshake passes
-reliably in isolation and intermittently times out inside a full-suite run.
+Known flakiness: `test/09`'s FIDO2 OKCONNECT handshake passes reliably in
+isolation and had intermittently timed out inside a full-suite run. It passed
+in-suite on both 2026-08-01 runs after the assertion-sizing change; not declared
+resolved on two observations, but no longer reproducing.
 
-Full suite status: **32-34 passing, 0-3 failing** depending on that
-intermittency and on `test/17-nwjs-composite-pgp` (the TC-11 GUI test, expected
-to fail until the browser lib gains `composite_sign`/`composite_decrypt`).
-**Measured before the 2026-08-01 assertion-sizing firmware change**; the suite
-has not been re-run end to end since that flash. Individually re-verified after
-it: `test/00-setup`, `test/09` (twice) and `test/17-nodejs-composite-pgp` (6/6).
+Full suite status on the 2026-08-01 firmware: **38 passing, 0 failing, 10
+pending** (4m). The pending ones are deliberate skips — TC-07 needs a physical
+unplug, and the GUI specs skip what the browser lib cannot yet do.
+
+The run before this one had 5 failures, all in `test/17-nodejs-composite-pgp`
+and all one cause, worth recording because it looked like a firmware regression
+and was not: `test/12` loaded a throwaway RSA-2048 key into **RSA slot 1**, the
+slot TC-11 keeps its composite blob in, with `features: 'd'`. `test/12` sorts
+first, so it overwrote the blob and left the slot decrypt-only — the device
+reported `Error key not set as signature key`, while the same spec passed 6/6
+run alone minutes earlier. Fixed by moving `test/12` to RSA4; TC-11's slot is
+the one named in the maintainer's own command.
 
 ## 4. Risk register / watch-items (likely failure points)
 
