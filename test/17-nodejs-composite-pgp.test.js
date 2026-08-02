@@ -246,54 +246,9 @@ describe('Composite PGP-PQC over Node FIDO2 (TC-11, node-first)', function () {
             // "does not verify" into wrong-key-material vs wrong-message -
             // which the DEBUG channel could not answer, since ML-DSA keygen
             // floods it and the prints are dropped (QUIRKS.md).
-            // SEED FIRST, then the public key. Order matters: fetching the
-            // 1952-byte key first and the 32-byte seed second returned the
-            // key's own first 32 bytes as the "seed" - a stale large-response
-            // buffer being re-served, not a real readback. Asking for the small
-            // value first cannot be fooled that way.
-            const devSeed = await compositeSign(fido2, channel, conn.sharedSecret, SLOT, 3, digest);
-            const hostSeed = Buffer.from(mldsaSeed);
-            console.log(`    [seed] host ${hostSeed.toString('hex')}`);
-            console.log(`    [seed] dev  ${Buffer.from(devSeed).toString('hex')}`);
-            const seedMatches = Buffer.from(devSeed).equals(hostSeed);
-
-            const devPk = await compositeSign(fido2, channel, conn.sharedSecret, SLOT, 2, digest);
-            const hostPk = Buffer.from(publicKey);
-            console.log(`    [pk] host ${hostPk.length}B ${hostPk.slice(0, 16).toString('hex')}...`);
-            console.log(`    [pk] dev  ${devPk.length}B ${devPk.slice(0, 16).toString('hex')}...`);
-            // Is the pk response simply SHIFTED by the previous response? If
-            // devPk[32:] == hostPk[:-32], retrieval is prepending the last
-            // response's bytes - a transport fault that would corrupt the
-            // signature identically, and would explain why it never verified.
-            const shifted = Buffer.from(devPk).slice(32).equals(hostPk.slice(0, hostPk.length - 32));
-            console.log(`    [shift] devPk[32:] === hostPk[:-32] ? ${shifted}`);
-            console.log(`    [shift] devPk[0:32] === devSeed ? ${Buffer.from(devPk).slice(0, 32).equals(Buffer.from(devSeed))}`);
-
-            assert.ok(seedMatches,
-                'device STORED a different ML-DSA seed than the blob carries - the fault is in '
-                + 'loading/storage, not in key derivation');
-
-            if (!Buffer.from(devPk).equals(hostPk)) {
-                // The keys diverge, so the seed the device fed to
-                // keypair_internal is not the 32 bytes at blob offset 32.
-                // mldsa_native's KeyGen_internal is FIPS 204 final (it mixes in
-                // the k/L domain bytes, sign.c:348-349), so the derivation
-                // itself is not in question - the input is. Try every 32-byte
-                // window of the blob: if one reproduces the device's key, the
-                // firmware is reading the seed from the wrong place and the
-                // offset says exactly where.
-                const b = Buffer.from(blob);
-                let found = null;
-                for (let off = 0; off + 32 <= b.length; off++) {
-                    const pk = ml_dsa65.keygen(Uint8Array.from(b.slice(off, off + 32))).publicKey;
-                    if (Buffer.from(pk).equals(Buffer.from(devPk))) { found = off; break; }
-                }
-                assert.fail(found === null
-                    ? 'device ML-DSA key matches NO 32-byte window of the blob - the seed is not '
-                      + 'coming from the blob at all, or the derivation differs'
-                    : `device derives its ML-DSA key from blob offset ${found}, not 32 `
-                      + `(PQC_OFF_MLDSA_SEED) - the firmware reads the wrong field`);
-            }
+            // Seed and public-key readbacks live in their own tests now -
+            // both confirmed byte-identical to the host. What is left to
+            // settle here is the SIGNATURE itself.
             assert.ok(Object.values(results).some(Boolean),
                 `ML-DSA-65 signature verified under NO framing: ${JSON.stringify(results)}`);
         } catch (e) {
