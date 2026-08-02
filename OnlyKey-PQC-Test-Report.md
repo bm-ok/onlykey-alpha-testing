@@ -36,11 +36,14 @@ against each item; the detail sits in the results matrix and in TEST-PLAN.md.
 - **Firmware has never been compiled or flashed** — ✅ done. Builds clean and
   is flashed unattended through a USB-HID passthrough rig (no human presses).
 - **No PQC operation has run on hardware** — ✅ done: X-Wing keygen, decaps,
-  derived keys, and the Ed25519 half of composite PGP-PQC signing.
+  derived keys, and both halves of composite PGP-PQC signing *and* decryption
+  (ML-DSA-65 signatures and ML-KEM-768 decapsulation, on-device).
 - **Web app derived-X-Wing is not end-to-end** — ✅ done, including the browser
   age-file container that was a TODO at handoff.
-- **Composite PGP-PQC end-to-end** — 🟡 partial: generate and load work, the
-  Ed25519 signing half works on hardware, the ML-DSA-65 half does not yet.
+- **Composite PGP-PQC end-to-end** — 🟡 partial: generate, load, sign (both
+  halves) and decrypt (both halves) all work on hardware. What is left is the
+  openpgp.js round trip through `registerCompositeHooks()` and the browser
+  path; the four device operations those depend on are proven.
 - **Cross-implementation interop** — ✅ for CLI↔web-app derived X-Wing
   (TC-18/19), both directions. GnuPG interop for composite PGP-PQC is still
   untested and needs a composite-PQC-aware GnuPG (algo 105/107) that this host
@@ -75,7 +78,7 @@ against each item; the detail sits in the results matrix and in TEST-PLAN.md.
 | 08 | Web app build + `test:pqc` | PASS | `npm run test:pqc` prints `pass 6, fail 0` (the maintainer's 5 cases plus a fixed-vector cross-check against Python's `derived_xwing.py`). Re-run 2026-08-01; also proves the webpack build. |
 | 09 | Derived X-Wing browser roundtrip | PASS | `test/10-fido2-xwing-derive.test.js`: device derive → host-side X-Wing encaps → device decap → combiner, shared secrets match byte-for-byte. Deterministic per label, different per label. The maintainer's "may be BLOCKED on container TODO" applied to the browser age-file container specifically; the cryptographic round-trip it wraps is proven. |
 | 10 | Device derive protocol (low-level) | PASS | `test/09`/`test/10`. FIDO2/CTAP2 client built from scratch (`lib/fido2/`). Derive/decap are `cmd=OKCONNECT` with `opt1` selecting `DERIVE_PUBLIC_KEY`/`DERIVE_SHAREDSEC` (+`_REQ_PRESS`) and `opt2=5` on the wire — **not** the `OKGETPUBKEY`/`OKDECRYPT` entries in `okcrypto.cpp`, which are unreachable over this bridge. <br>**Known flakiness:** `test/09`'s OKCONNECT handshake passes reliably in isolation (2/2, 7s) and intermittently times out inside a full-suite run. Unresolved. |
-| 11 | PGP-PQC gen→load→encrypt/decrypt/sign | **PARTIAL** | See TEST-PLAN.md's TC-11 entry for full detail. Steps 1-2 pass, and **step 4 (sign) now passes on hardware for both halves** — Ed25519 (64 B) and ML-DSA-65 (3309 B, retrieved in 7 chunks of 512), each verified against the public key derived from the same seed. `test/17-nodejs-composite-pgp.test.js` 6/6. Step 3 (decrypt) is not yet attempted, and the browser path (`test/17-nwjs-...`) is not yet confirmed — so the case stays PARTIAL. |
+| 11 | PGP-PQC gen→load→encrypt/decrypt/sign | **PARTIAL** | See TEST-PLAN.md's TC-11 entry for full detail. Steps 1-2 pass, and **steps 3 and 4 both now pass on hardware, all four halves** (`test/17-nodejs-composite-pgp.test.js` 8/8). Sign: Ed25519 (64 B) and ML-DSA-65 (3309 B, retrieved in 7 chunks of 512), each verified against the public key derived from the same seed. Decrypt: X25519 (32 B in) and ML-KEM-768 (1088 B ciphertext in, sent as 5 keyhandles, decapsulated on-device), both shared secrets matching the host byte-for-byte. What remains is the openpgp.js round trip through `registerCompositeHooks()` and the browser path (`test/17-nwjs-...`) — so the case stays PARTIAL. |
 | 12 | `hidraw` transport (#89) | PASS | `hidraw` (not the `hid` fallback) is what imports in `okpqc-venv` on this Linux box; dozens of back-to-back CLI invocations across the suite with zero interface-contention errors. |
 | 13 | Reserved-slot guard: backup/HMAC/SSH/GPG intact | PASS | `test/06` (SSH derived keys), `test/07` (GPG identity end-to-end), `test/08` (hmackeymode/backupkeymode toggles + malformed-backup rejection). Backup *file creation* and HMAC challenge-response are not testable from this repo — no tooling exists for either. |
 | 14 | Packaging versions/description | PASS | `onlykey` 1.2.11, `lib-agent` 1.0.8, `onlykey-agent` 1.1.16, all editable; `twine check` clean (`lib-agent` has cosmetic-only warnings). |
@@ -147,8 +150,9 @@ isolation and had intermittently timed out inside a full-suite run. It passed
 in-suite on both 2026-08-01 runs after the assertion-sizing change; not declared
 resolved on two observations, but no longer reproducing.
 
-Full suite status on the 2026-08-01 firmware: **38 passing, 0 failing, 10
-pending** (4m). The pending ones are deliberate skips — TC-07 needs a physical
+Full suite status on the 2026-08-01 firmware: **40 passing, 0 failing, 10
+pending** (4m), including the two composite-decrypt cases and a full
+regeneration of the X-Wing keys after the reflash. The pending ones are deliberate skips — TC-07 needs a physical
 unplug, and the GUI specs skip what the browser lib cannot yet do.
 
 The run before this one had 5 failures, all in `test/17-nodejs-composite-pgp`
