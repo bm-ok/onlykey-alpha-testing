@@ -535,6 +535,60 @@ the wrong thing — a challenge that was never entered, and a signature that was
 in fact valid. When a GUI failure disagrees with what the page visibly shows,
 believe the page.
 
+## Slot ownership across specs — the failure that looks like a firmware regression
+
+Twice on 2026-08-01, a spec wrote a key into a slot another spec measures
+against. Both times every affected case failed, both times the failure text
+pointed at the device, and both times the firmware was fine. Nothing errors,
+because the overwriting key is itself perfectly valid — so the reports read
+"device value differs from the host", which is exactly what a real firmware
+regression says.
+
+| Occurrence | What happened | Read as |
+|---|---|---|
+| `test/12` loaded a throwaway RSA-2048 key into **RSA1** with `features: 'd'` | It sorts before `test/17`, so it replaced TC-11's composite blob and left the slot decrypt-only | 5 failures, device reporting `Error key not set as signature key` |
+| `test/17-nwjs` generated a fresh composite key into **RSA1** each run | `test/17-nodejs` keeps a *cached* blob in RSA1 and checks device answers against it | 7 failures, every device value "differing from the host" |
+
+**The rule: a fixture another spec depends on gets a slot of its own.** Current
+allocation, and it is worth keeping this table honest:
+
+| Slot | Owner | Note |
+|---|---|---|
+| RSA1 | `test/17-nodejs` | cached composite blob (`.tc11-blob-cache.hex`), persists across runs |
+| RSA2 | `test/17-nwjs` | fresh composite key generated per run |
+| RSA4 | `test/12` | throwaway RSA-2048, `features: 'd'` |
+| ECC 101 | `test/01` (TC-04) and `test/03` | X-Wing keygen default; shared deliberately — `test/03` decrypts what `test/01` generated |
+| ECC 103 | `test/02` (TC-06) | non-default-slot keygen |
+| ECC 105 | `test/12` | classic x25519 |
+
+`test/12`'s existing comment about avoiding ECC 101/103 had the right instinct
+and only ever covered the ECC slots — the RSA slots were never on that list.
+
+**Why both were found late.** The second one could not surface at all while the
+GUI specs were skipping, which they had been for their whole existence.
+
+## Two harness traps that cost real time
+
+Neither is a device behaviour, so neither belongs in QUIRKS.md, but both
+produced conclusions that were simply wrong.
+
+**1. GUI specs skip silently, and a green suite can mean "did not run".** The
+`test/1x-gui-*` and `test/17-nwjs` specs call `this.skip()` when the nwjs
+harness is not up (`isAlive()`), which is correct behaviour and invisible in a
+pass/fail summary. Before the harness was started, the suite reported **40
+passing, 10 pending**; with it running, **47 passing, 3 pending**. The pending
+count is the coverage number — read it, not just the failures. The three that
+remain are deliberate: SETUP-03/04 self-skip on an already-initialised device,
+TC-07 needs a physical unplug.
+
+**2. Naming one spec file still runs all of them.** `.mocharc.json` sets
+`spec: "test/**/*.test.js"`, and mocha *merges* that with a positional argument
+rather than letting the argument replace it — so `npx mocha test/00-setup.test.js`
+runs the entire suite. `.mocharc.one.json` has no `spec` key, which is what
+makes `npm run test:one -- test/NN-*.test.js` actually run one spec. Use the
+latter for anything single-spec; the former silently costs six minutes and
+touches every slot on the device.
+
 ## Known minor issues (non-blocking)
 
 - **FIDO2 user-presence LED can stick pulsing blue if the host process dies mid-request.** `ctap_user_presence_test()` (`libraries/fido2/device.cpp`) calls `fadeoff(1)` on its own timeout path, and the analogous PIN-flow timeouts in `okcore.cpp` do the same. `fadeoff(color)`'s cleanup of the recurring `FadeinTask`/`FadeoutTask` pulse timers only happens when `color == 0` - a non-zero color (as passed here) leaves those timers running, relying instead on `Endfade.startDelayed()` firing `fadeendafter2sec()` ~2s later to actually stop them. Observed live (2026-07-24): after force-killing a background test run (`kill -9`) that was mid-`test/09` (FIDO2 OKCONNECT), the device was left with the blue LED pulsing indefinitely, well past that 2s window - though the device stayed fully functional throughout (unrelated PIN setup + X-Wing derive/decaps requests kept succeeding). A normal, non-destructive `restartDevice()` (button-8 long-press, `CPU_RESTART()`, no data loss) cleared it. Root cause of *why* the normal 2s self-clear didn't fire this time isn't confirmed - plausibly the interrupted request left the firmware's request-handling state machine short of whatever step re-arms/clears `Endfade`, but not chased further since it's cosmetic (LED only) and has a known, cheap workaround. Not filed as a TC since it doesn't correspond to any maintainer test case - flagging here for awareness.
