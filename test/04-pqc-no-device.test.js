@@ -8,8 +8,6 @@ const { PINS, VENV_BIN } = require('../lib/config');
 const { checkStatus } = require('../lib/device');
 const { runWithAutoConfirmRetrying } = require('../lib/pqc_keygen');
 
-const SHORT_PRESS = 10;
-const LONG_PRESS = 32;
 const SLOT = 101;
 
 // Maintainer's TC-07 ("wrong identity / no device"): unplug the OnlyKey and
@@ -59,12 +57,12 @@ describe('PQC X-Wing decrypt with no device attached (TC-07)', function () {
 
         const channel = new SeremuChannel();
         await channel.connect();
-        channel.send(['8'.charCodeAt(0), LONG_PRESS]);
+        channel.sendLine('8');
         channel.close();
         await sleep(3000);
         await channel.connect();
         for (const digit of String(PINS.primary)) {
-            channel.send([digit.charCodeAt(0), SHORT_PRESS]);
+            channel.sendPress(digit);
         }
         for (let i = 0; i < 10; i++) {
             await sleep(500);

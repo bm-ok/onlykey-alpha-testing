@@ -60,7 +60,6 @@ const { runInConfigMode } = require('../lib/config_mode');
 // no prediction involved. See setupRealtimeSignCapture/pollPendingDigest
 // below.
 const PGP_PQC_URL = 'http://localhost:3000/app/pgp-pqc';
-const SHORT_PRESS = 10; // '\n'
 const PRIMED_RE = /Encrypted Buffer/; // done_process_packets()'s DEBUG print, okcore.cpp - see composite_pgp_challenge.js
 
 function runCli(args, { timeoutMs = 20000 } = {}) {
@@ -147,11 +146,11 @@ function attachDeviceTrace(err, channel, label, { lines = 40 } = {}) {
 // said it is ready, the only correct move is to stop.
 //
 // The fixed 400ms between presses is gone for the same reason. The firmware
-// echoes `I received from DEBUG: <digit>` from its terminator branch exactly
-// once per complete press, and dispatches the press inline in loop() right
-// afterwards - so the echo for press N+1 cannot appear until press N's
-// handler has returned. Waiting on that echo is what the delay was
-// approximating, and unlike the delay it cannot be wrong.
+// echoes `I received from DEBUG: <digit>` exactly once per completed line,
+// carrying the line's first byte, and acts on the line inline in loop() right
+// afterwards - so the echo for line N+1 cannot appear until line N's handler
+// has returned. Waiting on that echo is what the delay was approximating, and
+// unlike the delay it cannot be wrong.
 // Parses the firmware's `Received Message` byteprint out of the DEBUG trace.
 //
 // done_process_packets() prints exactly the bytes the challenge is hashed
@@ -248,7 +247,7 @@ async function confirmOneChallenge(channel, challenge, { primedTimeoutMs = NO_RE
         const code = digit.charCodeAt(0);
         const echo = new RegExp(`I received from DEBUG: ${code}(?!\\d)`, 'g');
         const before = channel.countMatches(echo);
-        channel.send([code, SHORT_PRESS]);
+        channel.sendPress(d);
         try {
             await channel.waitForCount(echo, before + 1, ackTimeoutMs);
         } catch (e) {

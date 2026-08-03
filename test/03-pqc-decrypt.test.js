@@ -9,8 +9,6 @@ const { checkStatus } = require('../lib/device');
 const { runDecryptWithAutoConfirmRetrying } = require('../lib/pqc_decrypt');
 const { runWithAutoConfirmRetrying } = require('../lib/pqc_keygen');
 
-const SHORT_PRESS = 10;
-const LONG_PRESS = 32;
 const SLOT = 101;
 
 function runCli(args, { timeoutMs = 20000 } = {}) {
@@ -101,12 +99,12 @@ describe('PQC X-Wing encrypt/decrypt roundtrip (TC-05)', function () {
         // --identity below can run without TC-04's full confirm flow.
         const channel = new SeremuChannel();
         await channel.connect();
-        channel.send(['8'.charCodeAt(0), LONG_PRESS]);
+        channel.sendLine('8');
         channel.close();
         await sleep(3000);
         await channel.connect();
         for (const digit of String(PINS.primary)) {
-            channel.send([digit.charCodeAt(0), SHORT_PRESS]);
+            channel.sendPress(digit);
         }
         for (let i = 0; i < 10; i++) {
             await sleep(500);
